@@ -38,7 +38,7 @@ from sqlalchemy.orm import aliased
 
 from . import rich_logger
 from .config import Settings, get_settings
-from .db import ensure_schema, get_session, init_engine
+from .db import ensure_schema, get_engine, get_session, init_engine
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .llm import complete_system_user
 from .models import (
@@ -468,7 +468,14 @@ def _lifespan_factory(settings: Settings) -> Callable[[FastMCP], AsyncIterator[N
                 },
             )
         await ensure_schema(settings)
-        yield
+        try:
+            yield
+        finally:
+            with suppress(Exception):
+                engine = get_engine()
+                await engine.dispose()
+            with suppress(Exception):
+                clear_repo_cache()
 
     return lifespan  # type: ignore[return-value]
 
@@ -506,6 +513,21 @@ def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _naive_utc(dt: Optional[datetime] = None) -> datetime:
+    """Return a naive UTC datetime for SQLite comparisons.
+
+    SQLite stores datetimes without timezone info. When comparing Python
+    datetime objects with SQLite DATETIME columns via SQLAlchemy, both must
+    be naive to avoid 'can't compare offset-naive and offset-aware datetimes'.
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    if dt.tzinfo is not None:
+        # Convert to UTC first, then strip timezone
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def _max_datetime(*timestamps: Optional[datetime]) -> Optional[datetime]:
@@ -1397,6 +1419,34 @@ async def _get_project_by_identifier(identifier: str) -> Project:
             data={"parameter": "project_key", "provided": repr(identifier)},
         )
 
+    # Detect common placeholder patterns - these indicate unconfigured hooks/settings
+    _placeholder_patterns = [
+        "YOUR_PROJECT",
+        "YOUR_PROJECT_PATH",
+        "YOUR_PROJECT_KEY",
+        "PLACEHOLDER",
+        "<PROJECT>",
+        "{PROJECT}",
+        "$PROJECT",
+    ]
+    identifier_upper = identifier.upper().strip()
+    for pattern in _placeholder_patterns:
+        if pattern in identifier_upper or identifier_upper == pattern:
+            raise ToolExecutionError(
+                "CONFIGURATION_ERROR",
+                f"Detected placeholder value '{identifier}' instead of a real project path. "
+                f"This typically means a hook or integration script hasn't been configured yet. "
+                f"Replace placeholder values in your .claude/settings.json or environment variables "
+                f"with actual project paths like '/Users/you/projects/myproject'.",
+                recoverable=True,
+                data={
+                    "parameter": "project_key",
+                    "provided": identifier,
+                    "detected_placeholder": pattern,
+                    "fix_hint": "Update AGENT_MAIL_PROJECT or project_key in your configuration",
+                },
+            )
+
     slug = slugify(identifier)
     async with get_session() as session:
         result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
@@ -2128,6 +2178,33 @@ async def _get_agent(project: Project, name: str) -> Agent:
             data={"parameter": "agent_name", "provided": repr(name), "project": project.slug},
         )
 
+    # Detect placeholder values (indicates unconfigured hooks/settings)
+    _agent_placeholder_patterns = [
+        "YOUR_AGENT",
+        "YOUR_AGENT_NAME",
+        "AGENT_NAME",
+        "PLACEHOLDER",
+        "<AGENT>",
+        "{AGENT}",
+        "$AGENT",
+    ]
+    name_upper = name.upper().strip()
+    for pattern in _agent_placeholder_patterns:
+        if pattern in name_upper or name_upper == pattern:
+            raise ToolExecutionError(
+                "CONFIGURATION_ERROR",
+                f"Detected placeholder value '{name}' instead of a real agent name. "
+                f"This typically means a hook or integration script hasn't been configured yet. "
+                f"Replace placeholder values with your actual agent name (e.g., 'BlueMountain').",
+                recoverable=True,
+                data={
+                    "parameter": "agent_name",
+                    "provided": name,
+                    "detected_placeholder": pattern,
+                    "fix_hint": "Update AGENT_MAIL_AGENT or agent_name in your configuration",
+                },
+            )
+
     async with get_session() as session:
         result = await session.execute(
             select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
@@ -2255,6 +2332,80 @@ async def _create_file_reservation(
         await session.commit()
         await session.refresh(file_reservation)
     return file_reservation
+
+
+def _file_reservation_payload(
+    project: Project,
+    reservation: FileReservation,
+    agent: Agent,
+    *,
+    branch: Optional[str] = None,
+    worktree: Optional[str] = None,
+    reason_override: Optional[str] = None,
+) -> dict[str, Any]:
+    """Build a normalized payload for Git archive file_reservation records.
+
+    If released_ts is set, clamp expires_ts to released_ts so client-side guards
+    treat the reservation as inactive even if the original expiry was later.
+    """
+    released_dt = _ensure_utc(reservation.released_ts)
+    expires_dt = _ensure_utc(reservation.expires_ts)
+    if released_dt and expires_dt:
+        if released_dt < expires_dt:
+            expires_dt = released_dt
+    elif released_dt and expires_dt is None:
+        expires_dt = released_dt
+
+    payload: dict[str, Any] = {
+        "id": reservation.id,
+        "project": project.human_key,
+        "agent": agent.name,
+        "path_pattern": reservation.path_pattern,
+        "exclusive": reservation.exclusive,
+        "reason": reason_override if reason_override is not None else reservation.reason,
+        "created_ts": _iso(reservation.created_ts),
+        "expires_ts": _iso(expires_dt) if expires_dt else _iso(reservation.expires_ts),
+    }
+    if released_dt is not None:
+        payload["released_ts"] = _iso(released_dt)
+    if branch:
+        payload["branch"] = branch
+    if worktree:
+        payload["worktree"] = worktree
+    return payload
+
+
+async def _write_file_reservation_records(
+    project: Project,
+    records: Sequence[tuple[FileReservation, Agent]],
+    *,
+    archive: ProjectArchive | None = None,
+    archive_locked: bool = False,
+    reason_override: Optional[str] = None,
+) -> None:
+    if not records:
+        return
+    if archive_locked and archive is None:
+        raise ValueError("archive_locked=True requires a provided archive")
+    settings = get_settings()
+    target_archive = archive or await ensure_archive(settings, project.slug)
+
+    async def _write_all() -> None:
+        for reservation, agent in records:
+            payload = _file_reservation_payload(
+                project,
+                reservation,
+                agent,
+                reason_override=reason_override,
+            )
+            await write_file_reservation_record(target_archive, payload)
+
+    if archive_locked:
+        await _write_all()
+        return
+
+    async with _archive_write_lock(target_archive):
+        await _write_all()
 
 
 async def _collect_file_reservation_statuses(
@@ -2394,7 +2545,12 @@ async def _collect_file_reservation_statuses(
     return statuses
 
 
-async def _expire_stale_file_reservations(project_id: int) -> list[FileReservationStatus]:
+async def _expire_stale_file_reservations(
+    project_id: int,
+    *,
+    archive: ProjectArchive | None = None,
+    archive_locked: bool = False,
+) -> list[FileReservationStatus]:
     await ensure_schema()
     now = datetime.now(timezone.utc)
 
@@ -2404,39 +2560,77 @@ async def _expire_stale_file_reservations(project_id: int) -> list[FileReservati
     if project is None:
         return []
 
+    expired_pairs: list[tuple[FileReservation, Agent]] = []
     # Release any entries whose TTL has already elapsed
     async with get_session() as session:
-        await session.execute(
-            update(FileReservation)
+        expired_rows = await session.execute(
+            select(FileReservation, Agent)
+            .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
             .where(
                 cast(Any, FileReservation.project_id) == project_id,
                 cast(Any, FileReservation.released_ts).is_(None),
-                FileReservation.expires_ts < now,  # type: ignore[arg-type]
+                cast(Any, FileReservation.expires_ts) < _naive_utc(now),  # SQLite needs naive datetime
             )
-            .values(released_ts=now)
         )
-        await session.commit()
-  # type: ignore[arg-type]
+        expired_pairs = [cast(tuple[FileReservation, Agent], row) for row in expired_rows.all()]
+        if expired_pairs:
+            await session.execute(
+                update(FileReservation)
+                .where(
+                    cast(Any, FileReservation.project_id) == project_id,
+                    cast(Any, FileReservation.released_ts).is_(None),
+                    cast(Any, FileReservation.expires_ts) < _naive_utc(now),  # SQLite needs naive datetime
+                )
+                .values(released_ts=now)
+            )
+            await session.commit()
     statuses = await _collect_file_reservation_statuses(project, include_released=False, now=now)
     stale_statuses = [status for status in statuses if status.stale and status.reservation.id is not None]  # type: ignore[arg-type]
     stale_ids = [cast(int, status.reservation.id) for status in stale_statuses]
-    if not stale_ids:
-        return []
-
-    async with get_session() as session:
-        await session.execute(
-            update(FileReservation)
-            .where(
-                cast(Any, FileReservation.project_id) == project_id,
-                cast(Any, FileReservation.id).in_(stale_ids),
-                cast(Any, FileReservation.released_ts).is_(None),
+    if stale_ids:
+        async with get_session() as session:
+            await session.execute(
+                update(FileReservation)
+                .where(
+                    cast(Any, FileReservation.project_id) == project_id,
+                    cast(Any, FileReservation.id).in_(stale_ids),
+                    cast(Any, FileReservation.released_ts).is_(None),
+                )
+                .values(released_ts=now)
             )
-            .values(released_ts=now)
-        )
-        await session.commit()
-  # type: ignore[arg-type]
+            await session.commit()
+
+        for status in stale_statuses:
+            status.reservation.released_ts = now
+
+    for reservation, _agent in expired_pairs:
+        reservation.released_ts = now
+
+    released_pairs: list[tuple[FileReservation, Agent]] = []
+    seen_ids: set[int] = set()
+    for reservation, agent in expired_pairs:
+        if reservation.id is None:
+            continue
+        if reservation.id in seen_ids:
+            continue
+        seen_ids.add(reservation.id)
+        released_pairs.append((reservation, agent))
     for status in stale_statuses:
-        status.reservation.released_ts = now
+        if status.reservation.id is None:
+            continue
+        if status.reservation.id in seen_ids:
+            continue
+        seen_ids.add(status.reservation.id)
+        released_pairs.append((status.reservation, status.agent))
+
+    if released_pairs:
+        await _write_file_reservation_records(
+            project,
+            released_pairs,
+            archive=archive,
+            archive_locked=archive_locked,
+        )
+
     return stale_statuses
 
 
@@ -2956,7 +3150,11 @@ def build_mcp_server() -> FastMCP:
         async with _archive_write_lock(archive):
             # Server-side file_reservations enforcement: block if conflicting active exclusive file_reservation exists
             if settings.file_reservations_enforcement_enabled:
-                await _expire_stale_file_reservations(project.id or 0)
+                await _expire_stale_file_reservations(
+                    project.id or 0,
+                    archive=archive,
+                    archive_locked=True,
+                )
                 now_ts = datetime.now(timezone.utc)
                 y_dir = now_ts.strftime("%Y")
                 m_dir = now_ts.strftime("%m")
@@ -2972,7 +3170,7 @@ def build_mcp_server() -> FastMCP:
                         .where(
                             cast(Any, FileReservation.project_id) == project.id,
                             cast(Any, FileReservation.released_ts).is_(None),
-                            cast(Any, FileReservation.expires_ts) > now_ts,
+                            cast(Any, FileReservation.expires_ts) > _naive_utc(now_ts),
                         )
                     )
                     active_file_reservations = rows.all()
@@ -3712,7 +3910,7 @@ def build_mcp_server() -> FastMCP:
                     file_reservation_rows = await s2.execute(
                         cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
                         .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
-                        .where(FileReservation.project_id == project.id, cast(Any, FileReservation.released_ts).is_(None), cast(Any, FileReservation.expires_ts) > now_utc)
+                        .where(FileReservation.project_id == project.id, cast(Any, FileReservation.released_ts).is_(None), cast(Any, FileReservation.expires_ts) > _naive_utc(now_utc))
                     )
                     name_to_file_reservations: dict[str, list[str]] = {}
                     for c, nm in file_reservation_rows.all():
@@ -5860,7 +6058,7 @@ def build_mcp_server() -> FastMCP:
                 .where(
                     cast(Any, FileReservation.project_id) == project_id,
                     cast(Any, FileReservation.released_ts).is_(None),
-                    cast(Any, FileReservation.expires_ts) > datetime.now(timezone.utc),
+                    cast(Any, FileReservation.expires_ts) > _naive_utc(),
                 )
             )
             existing_reservations = existing_rows.all()
@@ -5903,19 +6101,14 @@ def build_mcp_server() -> FastMCP:
                             ctx_worktree = None
                 except Exception:
                     pass
-                file_reservation_payload = {
-                    "id": file_reservation.id,
-                    "project": project.human_key,
-                    "agent": agent.name,
-                    "path_pattern": file_reservation.path_pattern,
-                    "exclusive": file_reservation.exclusive,
-                    "reason": file_reservation.reason,
-                    "created_ts": _iso(file_reservation.created_ts),
-                    "expires_ts": _iso(file_reservation.expires_ts),
-                    "branch": ctx_branch,
-                    "worktree": ctx_worktree,
-                }
-                await write_file_reservation_record(archive, file_reservation_payload)  # type: ignore[arg-type]
+                file_reservation_payload = _file_reservation_payload(
+                    project,
+                    file_reservation,
+                    agent,
+                    branch=ctx_branch,
+                    worktree=ctx_worktree,
+                )
+                await write_file_reservation_record(archive, file_reservation_payload)
                 granted.append(
                     {
                         "id": file_reservation.id,
@@ -5993,23 +6186,44 @@ def build_mcp_server() -> FastMCP:
                 raise ValueError("Project and agent must have ids before releasing file_reservations.")
             await ensure_schema()
             now = datetime.now(timezone.utc)
+            reservations: list[FileReservation] = []
             async with get_session() as session:
-                stmt = (
-                    update(FileReservation)
+                select_stmt = (
+                    select(FileReservation)
                     .where(
                         cast(Any, FileReservation.project_id) == project.id,
                         cast(Any, FileReservation.agent_id) == agent.id,
                         cast(Any, FileReservation.released_ts).is_(None),
                     )
-                    .values(released_ts=now)
                 )
                 if file_reservation_ids:
-                    stmt = stmt.where(cast(Any, FileReservation.id).in_(file_reservation_ids))
+                    select_stmt = select_stmt.where(cast(Any, FileReservation.id).in_(file_reservation_ids))
                 if paths:
-                    stmt = stmt.where(cast(Any, FileReservation.path_pattern).in_(paths))
-                result = await session.execute(stmt)
-                await session.commit()
-            affected = int(result.rowcount or 0)  # type: ignore[attr-defined]
+                    select_stmt = select_stmt.where(cast(Any, FileReservation.path_pattern).in_(paths))
+                result = await session.execute(select_stmt)
+                reservations = list(result.scalars().all())
+                if reservations:
+                    ids = [res.id for res in reservations if res.id is not None]
+                    if ids:
+                        await session.execute(
+                            update(FileReservation)
+                            .where(
+                                cast(Any, FileReservation.project_id) == project.id,
+                                cast(Any, FileReservation.agent_id) == agent.id,
+                                cast(Any, FileReservation.released_ts).is_(None),
+                                cast(Any, FileReservation.id).in_(ids),
+                            )
+                            .values(released_ts=now)
+                        )
+                        await session.commit()
+            affected = len(reservations)
+            for reservation in reservations:
+                reservation.released_ts = now
+            if reservations:
+                await _write_file_reservation_records(
+                    project,
+                    [(reservation, agent) for reservation in reservations],
+                )
             await ctx.info(f"Released {affected} file_reservations for '{agent.name}'.")
             return {"released": affected, "released_at": _iso(now)}
         except Exception as exc:
@@ -6111,9 +6325,13 @@ def build_mcp_server() -> FastMCP:
                 )
                 .values(released_ts=now)
             )
-            await session.commit()
+        await session.commit()
 
         reservation.released_ts = now
+        await _write_file_reservation_records(
+            project,
+            [(reservation, holder)],
+        )
         settings = get_settings()
         grace_seconds = int(settings.file_reservation_activity_grace_seconds)
         inactivity_seconds = int(settings.file_reservation_inactivity_seconds)
@@ -6289,20 +6507,10 @@ def build_mcp_server() -> FastMCP:
             await session.commit()
 
         # Update Git artifacts for the renewed file_reservations
-        archive = await ensure_archive(settings, project.slug)
-        async with _archive_write_lock(archive):
-            for file_reservation_info in updated:
-                payload = {
-                    "id": file_reservation_info["id"],
-                    "project": project.human_key,
-                    "agent": agent.name,
-                    "path_pattern": file_reservation_info["path_pattern"],
-                    "exclusive": True,
-                    "reason": "renew",
-                    "created_ts": _iso(now),
-                    "expires_ts": file_reservation_info["new_expires_ts"],
-                }
-                await write_file_reservation_record(archive, payload)
+        await _write_file_reservation_records(
+            project,
+            [(reservation, agent) for reservation in file_reservations],
+        )
         await ctx.info(f"Renewed {len(updated)} file_reservation(s) for '{agent.name}'.")
         return {"renewed": len(updated), "file_reservations": updated}
 
