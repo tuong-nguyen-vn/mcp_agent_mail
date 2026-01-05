@@ -13,7 +13,11 @@ from decouple import (  # type: ignore[import-untyped,attr-defined]
     RepositoryEnv,
 )
 
-_DOTENV_PATH: Final[Path] = Path(".env")
+# Use .env from mcp_agent_mail's dedicated config directory, NOT from CWD
+# This prevents conflicts when running `am` CLI in other projects that have their own .env
+_MCP_AGENT_MAIL_CONFIG_DIR: Final[Path] = Path.home() / ".mcp_agent_mail"
+_DOTENV_PATH: Final[Path] = _MCP_AGENT_MAIL_CONFIG_DIR / ".env"
+
 # Gracefully handle missing .env (e.g., in CI/tests) by falling back to an empty repository
 try:
     _decouple_config: Final[DecoupleConfig] = DecoupleConfig(RepositoryEnv(str(_DOTENV_PATH)))
@@ -236,8 +240,10 @@ def get_settings() -> Settings:
         allow_localhost_unauthenticated=_bool(_decouple_config("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", default="true"), default=True),
     )
 
+    # Use absolute path in user's home directory to avoid creating DB files in CWD
+    _default_db_path = Path.home() / ".mcp_agent_mail" / "storage.sqlite3"
     database_settings = DatabaseSettings(
-        url=_decouple_config("DATABASE_URL", default="sqlite+aiosqlite:///./storage.sqlite3"),
+        url=_decouple_config("DATABASE_URL", default=f"sqlite+aiosqlite:///{_default_db_path}"),
         echo=_bool(_decouple_config("DATABASE_ECHO", default="false"), default=False),
     )
 

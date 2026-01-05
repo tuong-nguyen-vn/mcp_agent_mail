@@ -7,6 +7,7 @@ import random
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from functools import wraps
+from pathlib import Path
 from typing import Any, TypeVar
 
 from sqlalchemy.exc import OperationalError
@@ -95,6 +96,14 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
     is_sqlite = "sqlite" in settings.url.lower()
 
     if is_sqlite:
+        # Ensure parent directory exists for SQLite database file
+        # Extract path from URL like "sqlite+aiosqlite:///path/to/db.sqlite3"
+        import re
+        match = re.search(r"sqlite.*:///(.+)$", settings.url)
+        if match:
+            db_path = Path(match.group(1)).expanduser().resolve()
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+
         # Register datetime adapters ONCE globally for Python 3.12+ compatibility
         # These are module-level registrations, not per-connection
         import datetime as dt_module

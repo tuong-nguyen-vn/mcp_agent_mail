@@ -111,17 +111,26 @@ source ~/.zshrc
 
 ### File .env
 
-Tạo file `.env` trong thư mục project (copy từ `.env.example`):
+MCP Agent Mail lưu config tại `~/.mcp_agent_mail/.env` (KHÔNG phải trong thư mục project).
+
+Điều này đảm bảo khi chạy `am` trong bất kỳ dự án nào, nó không bị conflict với `.env` của dự án đó.
 
 ```bash
-cp .env.example .env
+# Tạo thư mục config
+mkdir -p ~/.mcp_agent_mail
+
+# Copy file example
+cp .env.example ~/.mcp_agent_mail/.env
+
+# Hoặc tạo mới
+nano ~/.mcp_agent_mail/.env
 ```
 
 Các biến quan trọng:
 
 ```bash
-# Database
-DATABASE_URL=sqlite+aiosqlite:///./storage.sqlite3
+# Database (mặc định: ~/.mcp_agent_mail/storage.sqlite3)
+# DATABASE_URL=sqlite+aiosqlite:///path/to/custom.sqlite3
 
 # HTTP Server
 HTTP_HOST=127.0.0.1
@@ -134,6 +143,14 @@ HTTP_BEARER_TOKEN=your-secret-token
 # Logging
 TOOLS_LOG_ENABLED=true
 ```
+
+### Vị trí lưu trữ data
+
+| Data | Đường dẫn mặc định |
+|------|-------------------|
+| Config `.env` | `~/.mcp_agent_mail/.env` |
+| Database | `~/.mcp_agent_mail/storage.sqlite3` |
+| Git mailbox | `~/.mcp_agent_mail_git_mailbox_repo/` |
 
 ### Khởi tạo database
 
@@ -303,7 +320,13 @@ sudo rm /usr/local/bin/am /usr/local/bin/mcp-agent-mail
 ### Xóa khỏi PATH
 Sửa `~/.zshrc` hoặc `~/.bashrc`, xóa dòng export PATH.
 
-### Xóa toàn bộ
+### Xóa data và config
+```bash
+rm -rf ~/.mcp_agent_mail
+rm -rf ~/.mcp_agent_mail_git_mailbox_repo
+```
+
+### Xóa toàn bộ source code
 ```bash
 rm -rf /path/to/mcp_agent_mail
 ```
