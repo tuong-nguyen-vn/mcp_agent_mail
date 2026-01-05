@@ -276,6 +276,14 @@ def _create_tool_call_summary_table(ctx: ToolCallContext) -> Table:
 
 def log_tool_call_start(ctx: ToolCallContext) -> None:
     """Log the start of a tool call with full details."""
+    # Check if logging is enabled
+    try:
+        from .config import get_settings
+        if not get_settings().tools_log_enabled:
+            return
+    except Exception:
+        pass
+
     # Create the main panel with all information
     components: list[RenderableType] = []
 
@@ -310,6 +318,14 @@ def log_tool_call_start(ctx: ToolCallContext) -> None:
 
 def log_tool_call_end(ctx: ToolCallContext) -> Optional[str]:
     """Log the end of a tool call with results."""
+    # Check if logging is enabled
+    try:
+        from .config import get_settings
+        if not get_settings().tools_log_enabled:
+            return None
+    except Exception:
+        pass
+
     if not ctx.end_time:
         ctx.end_time = time.perf_counter()
 
@@ -378,10 +394,12 @@ def _build_tool_call_end_panel(ctx: ToolCallContext) -> Panel:
 
 def _render_panel_to_text(panel: Panel) -> str:
     """Render a Rich panel to plain text (no ANSI color codes)."""
-    capture_console = Console(stderr=True, force_terminal=True, record=True, color_system=None)
+    from io import StringIO
+    string_io = StringIO()
+    capture_console = Console(file=string_io, force_terminal=False, record=True, color_system=None, width=80)
     capture_console.print(panel)
     capture_console.print()
-    return capture_console.export_text(clear=True)
+    return string_io.getvalue()
 
 
 def log_tool_call_complete(

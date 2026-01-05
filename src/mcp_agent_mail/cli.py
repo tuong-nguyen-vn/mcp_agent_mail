@@ -33,7 +33,7 @@ from sqlalchemy import and_, asc, bindparam, desc, func, or_, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.sql import ColumnElement
 
-from .app import _sanitize_fts_query, build_mcp_server
+from .app import _sanitize_fts_query
 from .config import get_settings
 from .db import ensure_schema, get_session
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
@@ -114,7 +114,7 @@ def _register_mcp_tool_commands() -> None:
             @app.command(name=tname, help=tdesc[:200] if tdesc else f"Call MCP tool: {tname}")
             def tool_command(
                 args_json: Annotated[str, typer.Argument(help="Tool arguments as JSON string")] = "{}",
-                pretty: Annotated[bool, typer.Option("--pretty", "-p", help="Pretty print JSON output")] = True,
+                pretty: Annotated[bool, typer.Option("--pretty", "-p", help="Pretty print JSON output (default: robot mode with raw JSON)")] = False,
             ) -> None:
                 _execute_tool_call(tname, args_json, pretty)
 
@@ -124,6 +124,13 @@ def _register_mcp_tool_commands() -> None:
 
 def _execute_tool_call(tool_name: str, args_json: str, pretty: bool) -> None:
     """Execute an MCP tool call from CLI."""
+    # Robot mode: disable rich logging for clean JSON output
+    if not pretty:
+        os.environ["TOOLS_LOG_ENABLED"] = "false"
+        # Clear settings cache so the new env var takes effect
+        from .config import clear_settings_cache
+        clear_settings_cache()
+
     from .app import build_mcp_server
 
     mcp = build_mcp_server()
@@ -148,14 +155,20 @@ def _execute_tool_call(tool_name: str, args_json: str, pretty: bool) -> None:
             session = Session()
         request_context = RequestContext()
 
+        def __init__(self, verbose: bool = True) -> None:
+            self._verbose = verbose
+
         async def info(self, msg: str) -> None:
-            console.print(f"[dim]INFO: {msg}[/dim]")
+            if self._verbose:
+                console.print(f"[dim]INFO: {msg}[/dim]", highlight=False)
 
         async def warning(self, msg: str) -> None:
-            console.print(f"[yellow]WARN: {msg}[/yellow]")
+            if self._verbose:
+                console.print(f"[yellow]WARN: {msg}[/yellow]", highlight=False)
 
         async def error(self, msg: str) -> None:
-            console.print(f"[red]ERROR: {msg}[/red]")
+            if self._verbose:
+                console.print(f"[red]ERROR: {msg}[/red]", highlight=False)
 
         async def debug(self, msg: str) -> None:
             pass
@@ -180,7 +193,7 @@ def _execute_tool_call(tool_name: str, args_json: str, pretty: bool) -> None:
     async def _call_tool() -> Any:
         await ensure_schema()
         tool_func = mcp._tool_manager._tools[tool_name].fn
-        ctx = CLIContext()
+        ctx = CLIContext(verbose=pretty)
         result = await tool_func(ctx, **arguments)
         return _unwrap_result(result)
 
@@ -194,7 +207,8 @@ def _execute_tool_call(tool_name: str, args_json: str, pretty: bool) -> None:
             else:
                 console.print(result)
         else:
-            console.print(json.dumps(result, default=str))
+            # Robot mode: raw JSON to stdout (no rich formatting)
+            print(json.dumps(result, indent=2, default=str))
     except TypeError as e:
         console.print(f"[red]Error: {e}[/red]")
         console.print(f"[dim]Use 'tool info {tool_name}' to see required parameters[/dim]")
@@ -708,6 +722,7 @@ def serve_http(
     from . import rich_logger
     rich_logger.display_startup_banner(settings, resolved_host, resolved_port, resolved_path)
 
+    from .app import build_mcp_server
     server = build_mcp_server()
     app = build_http_app(settings, server)
     # Disable WebSockets: HTTP-only MCP transport. Stay compatible with tests that
@@ -4247,7 +4262,7 @@ def tools_info(
 def tools_call(
     tool_name: Annotated[str, typer.Argument(help="Name of the tool to call")],
     args_json: Annotated[str, typer.Argument(help="Tool arguments as JSON string")] = "{}",
-    pretty: Annotated[bool, typer.Option("--pretty", "-p", help="Pretty print JSON output")] = True,
+    pretty: Annotated[bool, typer.Option("--pretty", "-p", help="Pretty print JSON output (default: robot mode with raw JSON)")] = False,
 ) -> None:
     """Call an MCP tool directly with JSON arguments.
 
@@ -4255,6 +4270,12 @@ def tools_call(
         python -m mcp_agent_mail tool call ensure_project '{"human_key": "/path/to/project"}'
         python -m mcp_agent_mail tool call fetch_inbox '{"project_key": "/path", "agent_name": "BlueLake"}'
     """
+    # Robot mode: disable rich logging for clean JSON output
+    if not pretty:
+        os.environ["TOOLS_LOG_ENABLED"] = "false"
+        from .config import clear_settings_cache
+        clear_settings_cache()
+
     from .app import build_mcp_server
 
     mcp = build_mcp_server()
@@ -4282,14 +4303,20 @@ def tools_call(
             session = Session()
         request_context = RequestContext()
 
+        def __init__(self, verbose: bool = True) -> None:
+            self._verbose = verbose
+
         async def info(self, msg: str) -> None:
-            console.print(f"[dim]INFO: {msg}[/dim]")
+            if self._verbose:
+                console.print(f"[dim]INFO: {msg}[/dim]", highlight=False)
 
         async def warning(self, msg: str) -> None:
-            console.print(f"[yellow]WARN: {msg}[/yellow]")
+            if self._verbose:
+                console.print(f"[yellow]WARN: {msg}[/yellow]", highlight=False)
 
         async def error(self, msg: str) -> None:
-            console.print(f"[red]ERROR: {msg}[/red]")
+            if self._verbose:
+                console.print(f"[red]ERROR: {msg}[/red]", highlight=False)
 
         async def debug(self, msg: str) -> None:
             pass
@@ -4297,7 +4324,7 @@ def tools_call(
     async def _call_tool() -> Any:
         await ensure_schema()
         tool_func = mcp._tool_manager._tools[tool_name].fn
-        ctx = CLIContext()
+        ctx = CLIContext(verbose=pretty)
 
         # Call the tool function
         result = await tool_func(ctx, **arguments)
@@ -4311,7 +4338,8 @@ def tools_call(
             else:
                 console.print(result)
         else:
-            console.print(json.dumps(result, default=str))
+            # Robot mode: raw JSON to stdout (no rich formatting)
+            print(json.dumps(result, indent=2, default=str))
     except TypeError as e:
         # Handle missing required arguments
         console.print(f"[red]Error: {e}[/red]")
