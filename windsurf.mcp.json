@@ -3,7 +3,8 @@
     "mcp-agent-mail": {
       "type": "http",
       "url": "http://127.0.0.1:8765/mcp/",
-      "headers": { "Authorization": "Bearer YOUR_BEARER_TOKEN" }
+      "headers": { "Authorization": "Bearer d1192e8ac10a8b139261d92300877056e7b20d6c23ad217b5a19f6a89c658ae4" },
+      "note": "Import or configure this server in Windsurf's MCP settings"
     }
   }
 }

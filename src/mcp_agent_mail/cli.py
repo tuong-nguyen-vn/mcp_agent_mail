@@ -98,6 +98,115 @@ products_app = typer.Typer(help="Product Bus: manage products and links")
 app.add_typer(products_app, name="products")
 docs_app = typer.Typer(help="Documentation helpers for agent onboarding")
 app.add_typer(docs_app, name="docs")
+tools_app = typer.Typer(help="Call MCP tools directly from CLI (no server required)")
+app.add_typer(tools_app, name="tool")
+
+
+def _register_mcp_tool_commands() -> None:
+    """Auto-register all MCP tools as direct CLI commands."""
+    from .app import build_mcp_server
+
+    mcp = build_mcp_server()
+
+    for tool_name, tool_def in mcp._tool_manager._tools.items():
+        # Create a closure to capture tool_name
+        def make_command(tname: str, tdesc: str) -> None:
+            @app.command(name=tname, help=tdesc[:200] if tdesc else f"Call MCP tool: {tname}")
+            def tool_command(
+                args_json: Annotated[str, typer.Argument(help="Tool arguments as JSON string")] = "{}",
+                pretty: Annotated[bool, typer.Option("--pretty", "-p", help="Pretty print JSON output")] = True,
+            ) -> None:
+                _execute_tool_call(tname, args_json, pretty)
+
+        desc = tool_def.description or ""
+        make_command(tool_name, desc)
+
+
+def _execute_tool_call(tool_name: str, args_json: str, pretty: bool) -> None:
+    """Execute an MCP tool call from CLI."""
+    from .app import build_mcp_server
+
+    mcp = build_mcp_server()
+
+    if tool_name not in mcp._tool_manager._tools:
+        console.print(f"[red]Tool '{tool_name}' not found[/red]")
+        raise typer.Exit(1)
+
+    try:
+        arguments = json.loads(args_json)
+    except json.JSONDecodeError as e:
+        console.print(f"[red]Invalid JSON: {e}[/red]")
+        raise typer.Exit(1) from None
+
+    class CLIContext:
+        """Minimal context for CLI tool invocation."""
+
+        class RequestContext:
+            class Session:
+                async def send_log_message(self, *args: Any, **kwargs: Any) -> None:
+                    pass
+            session = Session()
+        request_context = RequestContext()
+
+        async def info(self, msg: str) -> None:
+            console.print(f"[dim]INFO: {msg}[/dim]")
+
+        async def warning(self, msg: str) -> None:
+            console.print(f"[yellow]WARN: {msg}[/yellow]")
+
+        async def error(self, msg: str) -> None:
+            console.print(f"[red]ERROR: {msg}[/red]")
+
+        async def debug(self, msg: str) -> None:
+            pass
+
+    def _unwrap_result(result: Any) -> Any:
+        """Unwrap ToolResult or other wrapper objects to get the actual data."""
+        # Handle fastmcp ToolResult objects
+        if hasattr(result, "data"):
+            return result.data
+        if hasattr(result, "content"):
+            # Some tools return objects with content attribute
+            content = result.content
+            if isinstance(content, list) and len(content) > 0 and hasattr(content[0], "text"):
+                # TextContent objects have a text attribute
+                try:
+                    return json.loads(content[0].text)
+                except (json.JSONDecodeError, TypeError):
+                    return content[0].text
+            return content
+        return result
+
+    async def _call_tool() -> Any:
+        await ensure_schema()
+        tool_func = mcp._tool_manager._tools[tool_name].fn
+        ctx = CLIContext()
+        result = await tool_func(ctx, **arguments)
+        return _unwrap_result(result)
+
+    try:
+        result = asyncio.run(_call_tool())
+        # Unwrap again in case of nested wrappers
+        result = _unwrap_result(result)
+        if pretty:
+            if isinstance(result, dict | list):
+                console.print_json(json.dumps(result, indent=2, default=str))
+            else:
+                console.print(result)
+        else:
+            console.print(json.dumps(result, default=str))
+    except TypeError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[dim]Use 'tool info {tool_name}' to see required parameters[/dim]")
+        raise typer.Exit(1) from None
+    except Exception as e:
+        console.print(f"[red]Tool execution failed: {e}[/red]")
+        raise typer.Exit(1) from None
+
+
+# Register all MCP tools as direct CLI commands
+with suppress(Exception):
+    _register_mcp_tool_commands()
 
 
 async def _get_project_record(identifier: str) -> Project:
@@ -4038,6 +4147,167 @@ def docs_insert_blurbs(
             f"\n[cyan]Summary:[/cyan] inserted into {inserted} file(s); skipped {skipped} file(s); "
             "other files already had the snippet."
         )
+
+
+# =============================================================================
+# MCP Tools CLI Wrapper
+# =============================================================================
+
+
+@tools_app.command("list")
+def tools_list(
+    json_output: Annotated[bool, typer.Option("--json", "-j", help="Output as JSON")] = False,
+) -> None:
+    """List all available MCP tools."""
+    from .app import build_mcp_server
+
+    mcp = build_mcp_server()
+
+    # Get registered tools from FastMCP
+    tools_info: list[dict[str, Any]] = []
+    for tool_name, tool_def in mcp._tool_manager._tools.items():
+        tools_info.append({
+            "name": tool_name,
+            "description": (tool_def.description or "")[:80] + ("..." if len(tool_def.description or "") > 80 else ""),
+        })
+
+    tools_info.sort(key=lambda x: x["name"])
+
+    if json_output:
+        console.print_json(json.dumps(tools_info, indent=2))
+    else:
+        table = Table(title="Available MCP Tools")
+        table.add_column("Tool Name", style="cyan")
+        table.add_column("Description")
+        for t in tools_info:
+            table.add_row(t["name"], t["description"])
+        console.print(table)
+        console.print(f"\n[dim]Total: {len(tools_info)} tools[/dim]")
+
+
+@tools_app.command("info")
+def tools_info(
+    tool_name: Annotated[str, typer.Argument(help="Name of the tool to inspect")],
+) -> None:
+    """Show detailed info about a specific MCP tool including parameters."""
+    from .app import build_mcp_server
+
+    mcp = build_mcp_server()
+
+    if tool_name not in mcp._tool_manager._tools:
+        console.print(f"[red]Tool '{tool_name}' not found[/red]")
+        raise typer.Exit(1)
+
+    tool_def = mcp._tool_manager._tools[tool_name]
+
+    console.print(f"\n[bold cyan]{tool_name}[/bold cyan]")
+    console.print(f"[dim]{tool_def.description}[/dim]\n")
+
+    # Parse parameters from the tool's input schema
+    if hasattr(tool_def, "parameters") and tool_def.parameters:
+        schema = tool_def.parameters
+        props = schema.get("properties", {})
+        required = set(schema.get("required", []))
+
+        if props:
+            table = Table(title="Parameters")
+            table.add_column("Name", style="cyan")
+            table.add_column("Type")
+            table.add_column("Required")
+            table.add_column("Description")
+
+            for pname, pdef in props.items():
+                ptype = pdef.get("type", "any")
+                pdesc = pdef.get("description", "")[:60]
+                preq = "✓" if pname in required else ""
+                table.add_row(pname, ptype, preq, pdesc)
+
+            console.print(table)
+    else:
+        console.print("[dim]No parameters[/dim]")
+
+    # Show example usage
+    console.print("\n[bold]Example usage:[/bold]")
+    console.print(f'  python -m mcp_agent_mail tool call {tool_name} \'{{"project_key": "/path/to/project"}}\'')
+
+
+@tools_app.command("call")
+def tools_call(
+    tool_name: Annotated[str, typer.Argument(help="Name of the tool to call")],
+    args_json: Annotated[str, typer.Argument(help="Tool arguments as JSON string")] = "{}",
+    pretty: Annotated[bool, typer.Option("--pretty", "-p", help="Pretty print JSON output")] = True,
+) -> None:
+    """Call an MCP tool directly with JSON arguments.
+
+    Example:
+        python -m mcp_agent_mail tool call ensure_project '{"human_key": "/path/to/project"}'
+        python -m mcp_agent_mail tool call fetch_inbox '{"project_key": "/path", "agent_name": "BlueLake"}'
+    """
+    from .app import build_mcp_server
+
+    mcp = build_mcp_server()
+
+    if tool_name not in mcp._tool_manager._tools:
+        console.print(f"[red]Tool '{tool_name}' not found[/red]")
+        console.print("[dim]Use 'tool list' to see available tools[/dim]")
+        raise typer.Exit(1)
+
+    # Parse arguments
+    try:
+        arguments = json.loads(args_json)
+    except json.JSONDecodeError as e:
+        console.print(f"[red]Invalid JSON: {e}[/red]")
+        raise typer.Exit(1) from None
+
+    # Create a proper async mock context for CLI usage
+    class CLIContext:
+        """Minimal context for CLI tool invocation."""
+
+        class RequestContext:
+            class Session:
+                async def send_log_message(self, *args: Any, **kwargs: Any) -> None:
+                    pass
+            session = Session()
+        request_context = RequestContext()
+
+        async def info(self, msg: str) -> None:
+            console.print(f"[dim]INFO: {msg}[/dim]")
+
+        async def warning(self, msg: str) -> None:
+            console.print(f"[yellow]WARN: {msg}[/yellow]")
+
+        async def error(self, msg: str) -> None:
+            console.print(f"[red]ERROR: {msg}[/red]")
+
+        async def debug(self, msg: str) -> None:
+            pass
+
+    async def _call_tool() -> Any:
+        await ensure_schema()
+        tool_func = mcp._tool_manager._tools[tool_name].fn
+        ctx = CLIContext()
+
+        # Call the tool function
+        result = await tool_func(ctx, **arguments)
+        return result
+
+    try:
+        result = asyncio.run(_call_tool())
+        if pretty:
+            if isinstance(result, dict | list):
+                console.print_json(json.dumps(result, indent=2, default=str))
+            else:
+                console.print(result)
+        else:
+            console.print(json.dumps(result, default=str))
+    except TypeError as e:
+        # Handle missing required arguments
+        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[dim]Use 'tool info {tool_name}' to see required parameters[/dim]")
+        raise typer.Exit(1) from None
+    except Exception as e:
+        console.print(f"[red]Tool execution failed: {e}[/red]")
+        raise typer.Exit(1) from None
 
 
 if __name__ == "__main__":
