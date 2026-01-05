@@ -1,10 +1,79 @@
 # MCP Agent Mail CLI Installation Guide
 
-## Quick Start
+## Yêu cầu hệ thống
 
-Sau khi cài đặt, bạn có thể gọi CLI từ bất kỳ đâu với lệnh `am` hoặc `mcp-agent-mail`.
+- **Python**: >= 3.14 (bắt buộc)
+- **uv**: Package manager (khuyên dùng thay pip)
+- **Git**: Để clone repo và lưu trữ Agent Mail data
 
-## Cài đặt Global
+## Cài đặt từ đầu
+
+### 1. Cài đặt Python 3.14+
+
+**macOS (Homebrew):**
+```bash
+brew install python@3.14
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install python3.14 python3.14-venv
+```
+
+**Kiểm tra version:**
+```bash
+python3.14 --version
+```
+
+### 2. Cài đặt uv (Package Manager)
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Hoặc với Homebrew:
+```bash
+brew install uv
+```
+
+### 3. Clone repo và setup
+
+```bash
+# Clone repo
+git clone https://github.com/Dicklesworthstone/mcp_agent_mail.git
+cd mcp_agent_mail
+
+# Tạo virtual environment với Python 3.14
+uv venv --python python3.14
+
+# Activate venv
+source .venv/bin/activate  # Linux/macOS
+# hoặc
+.venv\Scripts\activate     # Windows
+
+# Cài dependencies
+uv pip install -e .
+
+# Cài dev dependencies (optional)
+uv pip install -e ".[dev]"
+```
+
+### 4. Kiểm tra cài đặt
+
+```bash
+# Trong venv
+python -m mcp_agent_mail --help
+
+# Hoặc dùng alias
+am --help
+mcp-agent-mail --help
+```
+
+---
+
+## Cài đặt Global (gọi từ bất kỳ đâu)
 
 ### Cách 1: Symlink (Khuyên dùng)
 
@@ -22,11 +91,64 @@ echo 'export PATH="/Users/tuongnguyen/Workspaces/tool/mcp_agent_mail/.venv/bin:$
 source ~/.zshrc
 ```
 
-## Kiểm tra cài đặt
+### Cách 3: Alias trong shell config
+
+Thêm vào `~/.zshrc` hoặc `~/.bashrc`:
 
 ```bash
-am --help
+alias am='/Users/tuongnguyen/Workspaces/tool/mcp_agent_mail/.venv/bin/am'
+alias mcp-agent-mail='/Users/tuongnguyen/Workspaces/tool/mcp_agent_mail/.venv/bin/mcp-agent-mail'
 ```
+
+Sau đó:
+```bash
+source ~/.zshrc
+```
+
+---
+
+## Cấu hình
+
+### File .env
+
+Tạo file `.env` trong thư mục project (copy từ `.env.example`):
+
+```bash
+cp .env.example .env
+```
+
+Các biến quan trọng:
+
+```bash
+# Database
+DATABASE_URL=sqlite+aiosqlite:///./storage.sqlite3
+
+# HTTP Server
+HTTP_HOST=127.0.0.1
+HTTP_PORT=8765
+HTTP_PATH=/mcp
+
+# Authentication (optional)
+HTTP_BEARER_TOKEN=your-secret-token
+
+# Logging
+TOOLS_LOG_ENABLED=true
+```
+
+### Khởi tạo database
+
+Database được tạo tự động khi chạy lệnh đầu tiên:
+
+```bash
+am health_check '{}'
+```
+
+Hoặc chạy server:
+```bash
+am serve-http
+```
+
+---
 
 ## Sử dụng CLI
 
@@ -86,6 +208,8 @@ am fetch_inbox '{"project_key": "/path/to/project", "agent_name": "Orchestrator"
 am release_file_reservations '{"project_key": "/path/to/project", "agent_name": "BlueLake"}'
 ```
 
+---
+
 ## Output Options
 
 ```bash
@@ -99,19 +223,87 @@ am fetch_inbox '{"project_key": "/path", "agent_name": "Agent"}' --no-pretty
 am search_messages '{"project_key": "/path", "query": "test"}' 2>/dev/null
 ```
 
+---
+
+## Chạy HTTP Server
+
+Nếu cần dùng MCP qua HTTP thay vì CLI:
+
+```bash
+# Default settings
+am serve-http
+
+# Custom host/port
+am serve-http --host 0.0.0.0 --port 9000
+```
+
+Server sẽ chạy tại `http://127.0.0.1:8765/mcp` (mặc định).
+
+---
+
 ## Troubleshooting
 
 ### Command not found
 
-Đảm bảo đã chạy một trong các cách cài đặt ở trên và restart terminal.
+Đảm bảo đã chạy một trong các cách cài đặt global ở trên và restart terminal.
 
 ### Python version error
 
-Package yêu cầu Python >= 3.14. Đảm bảo venv được tạo với Python 3.14+.
+```
+ERROR: Package 'mcp-agent-mail' requires a different Python: 3.13.x not in '>=3.14'
+```
+
+Package yêu cầu Python >= 3.14. Cài Python 3.14+ và tạo lại venv:
+
+```bash
+uv venv --python python3.14
+source .venv/bin/activate
+uv pip install -e .
+```
 
 ### Database errors
 
-Chạy server một lần để khởi tạo database:
+Chạy health check để khởi tạo database:
 ```bash
-am serve-http
+am health_check '{}'
+```
+
+### Permission denied (symlink)
+
+Dùng sudo hoặc chọn cách 2/3 (PATH hoặc alias) không cần sudo.
+
+### Import errors
+
+Đảm bảo đang ở trong venv:
+```bash
+source /path/to/mcp_agent_mail/.venv/bin/activate
+which python  # Phải trỏ đến .venv/bin/python
+```
+
+---
+
+## Cập nhật
+
+```bash
+cd /path/to/mcp_agent_mail
+git pull
+source .venv/bin/activate
+uv pip install -e .
+```
+
+---
+
+## Gỡ cài đặt
+
+### Xóa symlinks
+```bash
+sudo rm /usr/local/bin/am /usr/local/bin/mcp-agent-mail
+```
+
+### Xóa khỏi PATH
+Sửa `~/.zshrc` hoặc `~/.bashrc`, xóa dòng export PATH.
+
+### Xóa toàn bộ
+```bash
+rm -rf /path/to/mcp_agent_mail
 ```
