@@ -4225,19 +4225,22 @@ def build_mcp_server() -> FastMCP:
                         },
                     )
                     try:
-                        from fastmcp.tools.tool import FunctionTool  # type: ignore
-                        # Prefer a single handshake with auto_accept=true
-                        handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
+                        # Call macro_contact_handshake directly (not via FunctionTool.run)
+                        # to avoid "No active context found" errors when invoked from CLI.
+                        # Access .fn since macro_contact_handshake is wrapped in FunctionTool by decorator.
+                        from fastmcp.tools.tool import FunctionTool
+                        handshake_fn = cast(FunctionTool, cast(Any, macro_contact_handshake)).fn
                         for nm in blocked_recipients:
                             try:
-                                await handshake.run({
-                                    "project_key": project.human_key,
-                                    "requester": sender.name,
-                                    "target": nm,
-                                    "reason": "auto-handshake by send_message",
-                                    "auto_accept": True,
-                                    "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
-                                })
+                                await handshake_fn(
+                                    ctx=ctx,
+                                    project_key=project.human_key,
+                                    requester=sender.name,
+                                    target=nm,
+                                    reason="auto-handshake by send_message",
+                                    auto_accept=True,
+                                    ttl_seconds=int(settings_local.contact_auto_ttl_seconds),
+                                )
                                 attempted.append(nm)
                                 CONTACT_METRICS["auto_handshake_success"] += 1
                                 logger.debug(
@@ -4617,8 +4620,11 @@ def build_mcp_server() -> FastMCP:
                 try:
                     effective_auto_contact = bool(auto_contact_if_blocked or getattr(settings_local, "messaging_auto_handshake_on_block", True))
                     if effective_auto_contact and unknown_external:
-                        from fastmcp.tools.tool import FunctionTool  # type: ignore
-                        handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
+                        # Call macro_contact_handshake directly (not via FunctionTool.run)
+                        # to avoid "No active context found" errors when invoked from CLI.
+                        # Access .fn since macro_contact_handshake is wrapped in FunctionTool by decorator.
+                        from fastmcp.tools.tool import FunctionTool
+                        handshake_fn = cast(FunctionTool, cast(Any, macro_contact_handshake)).fn
                         # Iterate over a copy since we may mutate/resolve entries
                         for label, names in list(unknown_external.items()):
                             try:
@@ -4627,17 +4633,16 @@ def build_mcp_server() -> FastMCP:
                                 continue
                             for nm in list(names):
                                 try:
-                                    await handshake.run(
-                                        {
-                                            "project_key": project.human_key,
-                                            "requester": sender.name,
-                                            "target": nm,
-                                            "to_project": target_proj.human_key or target_proj.slug,
-                                            "reason": "auto-handshake by send_message",
-                                            "auto_accept": True,
-                                            "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
-                                            "register_if_missing": True,
-                                        }
+                                    await handshake_fn(
+                                        ctx=ctx,
+                                        project_key=project.human_key,
+                                        requester=sender.name,
+                                        target=nm,
+                                        to_project=target_proj.human_key or target_proj.slug,
+                                        reason="auto-handshake by send_message",
+                                        auto_accept=True,
+                                        ttl_seconds=int(settings_local.contact_auto_ttl_seconds),
+                                        register_if_missing=True,
                                     )
                                     attempted_external.append(f"{nm}@{label}")
                                 except Exception:
@@ -5592,18 +5597,20 @@ def build_mcp_server() -> FastMCP:
 
         file_reservations_result: Optional[dict[str, Any]] = None
         if file_reservation_paths:
-            # Use MCP tool registry to avoid param shadowing (file_reservation_paths param shadows file_reservation_paths function)
+            # Call file_reservation_paths directly (not via FunctionTool.run)
+            # to avoid "No active context found" errors when invoked from CLI.
+            # Note: function and param have same name, so use the tool registry to get ref
             from fastmcp.tools.tool import FunctionTool
-            _file_reservation_tool = cast(FunctionTool, await mcp.get_tool("file_reservation_paths"))
-            _file_reservation_run = await _file_reservation_tool.run({
-                "project_key": project.human_key,
-                "agent_name": agent.name,
-                "paths": file_reservation_paths,
-                "ttl_seconds": file_reservation_ttl_seconds,
-                "exclusive": True,
-                "reason": file_reservation_reason,
-            })
-            file_reservations_result = cast(dict[str, Any], _file_reservation_run.structured_content or {})
+            _file_reservation_fn = cast(FunctionTool, await mcp.get_tool("file_reservation_paths")).fn
+            file_reservations_result = await _file_reservation_fn(
+                ctx=ctx,
+                project_key=project.human_key,
+                agent_name=agent.name,
+                paths=file_reservation_paths,
+                ttl_seconds=file_reservation_ttl_seconds,
+                exclusive=True,
+                reason=file_reservation_reason,
+            )
 
         inbox_items = await _list_inbox(
             project,
@@ -5707,28 +5714,30 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         """Reserve a set of file paths and optionally release them at the end of the workflow."""
 
-        # Call underlying FunctionTool directly so we don't treat the wrapper as a plain coroutine
+        # Call underlying tool functions directly (not via FunctionTool.run)
+        # to avoid "No active context found" errors when invoked from CLI.
+        # Access .fn since tool functions are wrapped in FunctionTool by decorator.
         from fastmcp.tools.tool import FunctionTool
-        file_reservations_tool = cast(FunctionTool, cast(Any, file_reservation_paths))
-        file_reservations_tool_result = await file_reservations_tool.run({
-            "project_key": project_key,
-            "agent_name": agent_name,
-            "paths": paths,
-            "ttl_seconds": ttl_seconds,
-            "exclusive": exclusive,
-            "reason": reason,
-        })
-        file_reservations_result = cast(dict[str, Any], file_reservations_tool_result.structured_content or {})
+        file_reservation_fn = cast(FunctionTool, cast(Any, file_reservation_paths)).fn
+        file_reservations_result = await file_reservation_fn(
+            ctx=ctx,
+            project_key=project_key,
+            agent_name=agent_name,
+            paths=paths,
+            ttl_seconds=ttl_seconds,
+            exclusive=exclusive,
+            reason=reason,
+        )
 
         release_result = None
         if auto_release:
-            release_tool = cast(FunctionTool, cast(Any, release_file_reservations_tool))
-            release_tool_result = await release_tool.run({
-                "project_key": project_key,
-                "agent_name": agent_name,
-                "paths": paths,
-            })
-            release_result = cast(dict[str, Any], release_tool_result.structured_content or {})
+            release_fn = cast(FunctionTool, cast(Any, release_file_reservations_tool)).fn
+            release_result = await release_fn(
+                ctx=ctx,
+                project_key=project_key,
+                agent_name=agent_name,
+                paths=paths,
+            )
 
         await ctx.info(
             f"macro_file_reservation_cycle issued {len(file_reservations_result['granted'])} file_reservation(s) for '{agent_name}' on '{project_key}'" +
@@ -5818,56 +5827,51 @@ def build_mcp_server() -> FastMCP:
                 },
             )
 
+        # Call underlying tool functions directly (not via FunctionTool.run)
+        # to avoid "No active context found" errors when invoked from CLI.
+        # Access .fn since tool functions are wrapped in FunctionTool by decorator.
         from fastmcp.tools.tool import FunctionTool
-        request_tool = cast(FunctionTool, cast(Any, request_contact))
-        request_payload: dict[str, Any] = {
-            "project_key": project_key,
-            "from_agent": real_requester,
-            "to_agent": real_target,
-            "reason": reason,
-            "ttl_seconds": ttl_seconds,
-        }
-        if target_project_key:
-            request_payload["to_project"] = target_project_key
-        if register_if_missing:
-            request_payload["register_if_missing"] = True
-        if program:
-            request_payload["program"] = program
-        if model:
-            request_payload["model"] = model
-        if task_description:
-            request_payload["task_description"] = task_description
-        request_tool_result = await request_tool.run(request_payload)
-        request_result = cast(dict[str, Any], request_tool_result.structured_content or {})
+        request_contact_fn = cast(FunctionTool, cast(Any, request_contact)).fn
+        request_result = await request_contact_fn(
+            ctx=ctx,
+            project_key=project_key,
+            from_agent=real_requester,
+            to_agent=real_target,
+            to_project=target_project_key if target_project_key else None,
+            reason=reason,
+            ttl_seconds=ttl_seconds,
+            register_if_missing=register_if_missing,
+            program=program,
+            model=model,
+            task_description=task_description,
+        )
 
         response_result = None
         if auto_accept:
-            respond_tool = cast(FunctionTool, cast(Any, respond_contact))
-            respond_payload: dict[str, Any] = {
-                "project_key": target_project_key or project_key,
-                "to_agent": real_target,
-                "from_agent": real_requester,
-                "accept": True,
-                "ttl_seconds": ttl_seconds,
-            }
-            if target_project_key:
-                respond_payload["from_project"] = project_key
-            respond_tool_result = await respond_tool.run(respond_payload)
-            response_result = cast(dict[str, Any], respond_tool_result.structured_content or {})
+            respond_contact_fn = cast(FunctionTool, cast(Any, respond_contact)).fn
+            response_result = await respond_contact_fn(
+                ctx=ctx,
+                project_key=target_project_key or project_key,
+                to_agent=real_target,
+                from_agent=real_requester,
+                from_project=project_key if target_project_key else None,
+                accept=True,
+                ttl_seconds=ttl_seconds,
+            )
 
         welcome_result = None
         if welcome_subject and welcome_body and not target_project_key:
             try:
-                send_tool = cast(FunctionTool, cast(Any, send_message))
-                send_tool_result = await send_tool.run({
-                    "project_key": project_key,
-                    "sender_name": real_requester,
-                    "to": [real_target],
-                    "subject": welcome_subject,
-                    "body_md": welcome_body,
-                    "thread_id": thread_id,
-                })
-                welcome_result = cast(dict[str, Any], send_tool_result.structured_content or {})
+                send_message_fn = cast(FunctionTool, cast(Any, send_message)).fn
+                welcome_result = await send_message_fn(
+                    ctx=ctx,
+                    project_key=project_key,
+                    sender_name=real_requester,
+                    to=[real_target],
+                    subject=welcome_subject,
+                    body_md=welcome_body,
+                    thread_id=thread_id,
+                )
             except ToolExecutionError as exc:
                 # surface but do not abort handshake
                 await ctx.debug(f"macro_contact_handshake failed to send welcome: {exc}")
@@ -6683,17 +6687,18 @@ def build_mcp_server() -> FastMCP:
                 ]
             )
             try:
+                # Call send_message directly (not via FunctionTool.run)
+                # to avoid "No active context found" errors when invoked from CLI.
+                # Access .fn since send_message is wrapped in FunctionTool by decorator.
                 from fastmcp.tools.tool import FunctionTool
-
-                send_tool = cast(FunctionTool, cast(Any, send_message))
-                await send_tool.run(
-                    {
-                        "project_key": project_key,
-                        "sender_name": agent_name,
-                        "to": [holder.name],
-                        "subject": f"[file-reservations] Released stale lock on {reservation.path_pattern}",
-                        "body_md": "\n".join(body_lines),
-                    }
+                send_message_fn = cast(FunctionTool, cast(Any, send_message)).fn
+                await send_message_fn(
+                    ctx=ctx,
+                    project_key=project_key,
+                    sender_name=agent_name,
+                    to=[holder.name],
+                    subject=f"[file-reservations] Released stale lock on {reservation.path_pattern}",
+                    body_md="\n".join(body_lines),
                 )
                 notified = True
             except Exception:
