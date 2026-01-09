@@ -2210,6 +2210,105 @@ async def _get_or_create_agent(
     return agent
 
 
+async def _register_recipient_exact(
+    project: Project,
+    name: str,
+    program: str,
+    model: str,
+    task_description: str,
+    settings: Settings,
+) -> Agent:
+    """Register or retrieve an agent using the EXACT name provided.
+
+    Unlike _get_or_create_agent, this function does NOT validate or coerce
+    agent names. It's specifically for auto-registering message recipients
+    where we need the agent to be findable by the exact name used in
+    the message addressing.
+
+    Use cases:
+    - Auto-registering unknown recipients in send_message
+    - Creating agents where caller explicitly chose the name
+
+    Parameters
+    ----------
+    project : Project
+        The project to register the agent in.
+    name : str
+        The exact agent name to use (will be sanitized but not coerced).
+    program : str
+        The AI program name (e.g., 'claude-code').
+    model : str
+        The model identifier.
+    task_description : str
+        Description of the agent's task.
+    settings : Settings
+        Application settings.
+
+    Returns
+    -------
+    Agent
+        The registered or existing agent with the exact name.
+
+    Raises
+    ------
+    ValueError
+        If name is empty or contains only whitespace.
+    """
+    if project.id is None:
+        raise ValueError("Project must have an id before creating agents.")
+
+    # Sanitize but do NOT validate/coerce the name
+    sanitized = sanitize_agent_name(name)
+    if not sanitized:
+        raise ValueError(f"Agent name '{name}' must contain alphanumeric characters.")
+
+    desired_name = sanitized
+
+    await ensure_schema()
+    async with get_session() as session:
+        # Check if agent already exists (case-insensitive)
+        result = await session.execute(
+            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == desired_name.lower())  # type: ignore[arg-type]
+        )
+        agent = result.scalars().first()
+        if agent:
+            # Update metadata
+            agent.program = program
+            agent.model = model
+            agent.task_description = task_description
+            agent.last_active_ts = datetime.now(timezone.utc)  # type: ignore[arg-type]
+            session.add(agent)
+            await session.commit()
+            await session.refresh(agent)
+        else:
+            # Create new agent with exact name
+            agent = Agent(
+                project_id=project.id,
+                name=desired_name,
+                program=program,
+                model=model,
+                task_description=task_description,
+            )
+            session.add(agent)
+            await session.commit()
+            await session.refresh(agent)
+
+    archive = await ensure_archive(settings, project.slug)
+    async with _archive_write_lock(archive):
+        await write_agent_profile(archive, _agent_to_dict(agent))
+
+    logger.debug(
+        "recipient_auto_registered",
+        extra={
+            "agent_name": desired_name,
+            "project": project.slug,
+            "program": program,
+        },
+    )
+
+    return agent
+
+
 async def _get_agent(project: Project, name: str) -> Agent:
     """Get agent by name with helpful error messages and suggestions."""
     await ensure_schema()
@@ -4474,21 +4573,39 @@ def build_mcp_server() -> FastMCP:
             if unknown_local or unknown_external:
                 # Auto-register missing local recipients if enabled
                 if getattr(settings_local, "messaging_auto_register_recipients", True):
-                    # Best effort: try to register any unknown local recipients with sane defaults
+                    # Best effort: try to register any unknown local recipients with exact names
+                    # NOTE: We use _register_recipient_exact instead of _get_or_create_agent
+                    # because _get_or_create_agent coerces invalid names to auto-generated ones,
+                    # which would cause the recipient lookup to still fail.
                     newly_registered: set[str] = set()
                     for missing in list(unknown_local):
                         try:
-                            _ = await _get_or_create_agent(
+                            registered_agent = await _register_recipient_exact(
                                 project,
                                 missing,
                                 sender.program,
                                 sender.model,
-                                sender.task_description,
+                                sender.task_description or f"Auto-registered recipient from {sender.name}",
                                 settings,
                             )
+                            # Add both the original name and the sanitized name for lookup
                             newly_registered.add(missing)
-                        except Exception:
-                            pass
+                            # Also update local_lookup so re-routing can find the agent
+                            sanitized_name = sanitize_agent_name(missing)
+                            if sanitized_name:
+                                local_lookup[sanitized_name.lower()] = registered_agent.name
+                            local_lookup[missing.lower()] = registered_agent.name
+                        except Exception as exc:
+                            logger.warning(
+                                "recipient_auto_register.failed",
+                                extra={
+                                    "recipient": missing,
+                                    "sender": sender.name,
+                                    "project": project.slug,
+                                    "error": type(exc).__name__,
+                                    "error_message": str(exc),
+                                },
+                            )
                     unknown_local.difference_update(newly_registered)
                     # Re-run routing for any that were registered
                     if newly_registered:
