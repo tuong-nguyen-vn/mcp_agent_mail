@@ -33,7 +33,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
     PathSpec = None  # type: ignore[misc,assignment]
     GitWildMatchPattern = None  # type: ignore[misc,assignment]
 from sqlalchemy import asc, bindparam, desc, func, or_, select, text, update
-from sqlalchemy.exc import NoResultFound
+from sqlalchemy.exc import NoResultFound, OperationalError
 from sqlalchemy.orm import aliased
 
 from . import rich_logger
@@ -64,7 +64,13 @@ from .storage import (
     write_file_reservation_record,
     write_message_bundle,
 )
-from .utils import generate_agent_name, sanitize_agent_name, slugify, validate_agent_name_format
+from .utils import (
+    canonicalize_project_identifier,
+    generate_agent_name,
+    sanitize_agent_name,
+    slugify,
+    validate_agent_name_format,
+)
 import contextlib
 
 logger = logging.getLogger(__name__)
@@ -94,6 +100,14 @@ def _git_repo(path: str | Path, search_parent_directories: bool = True) -> Any:
 TOOL_METRICS: defaultdict[str, dict[str, int]] = defaultdict(lambda: {"calls": 0, "errors": 0})
 TOOL_CLUSTER_MAP: dict[str, str] = {}
 TOOL_METADATA: dict[str, dict[str, Any]] = {}
+
+# Contact enforcement metrics for observability
+CONTACT_METRICS: dict[str, int] = {
+    "auto_handshake_calls": 0,
+    "auto_handshake_success": 0,
+    "auto_handshake_error": 0,
+    "enforcement_blocked": 0,
+}
 
 RECENT_TOOL_USAGE: deque[tuple[datetime, str, Optional[str], Optional[str]]] = deque(maxlen=4096)
 
@@ -1407,7 +1421,13 @@ async def _list_project_agents(project: Project, limit: int = 10) -> list[str]:
 
 
 async def _get_project_by_identifier(identifier: str) -> Project:
-    """Get project by identifier with helpful error messages and suggestions."""
+    """Get project by identifier with helpful error messages and suggestions.
+
+    Uses path canonicalization to handle WSL/Windows path equivalence:
+    - First tries canonical form (e.g., /mnt/c/foo → c:/foo)
+    - Falls back to legacy slug for backwards compatibility
+    - Logs fallback hits for migration visibility
+    """
     await ensure_schema()
 
     # Validate input
@@ -1447,12 +1467,32 @@ async def _get_project_by_identifier(identifier: str) -> Project:
                 },
             )
 
-    slug = slugify(identifier)
+    # Canonicalize the identifier for consistent lookup across WSL/Windows paths
+    canonical_identifier = canonicalize_project_identifier(identifier)
+    canonical_slug = slugify(canonical_identifier)
+
+    # Also compute legacy slug for fallback
+    legacy_slug = slugify(identifier)
+
     async with get_session() as session:
-        result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
+        # Try canonical slug first
+        result = await session.execute(select(Project).where(Project.slug == canonical_slug))  # type: ignore[arg-type]
         project = result.scalars().first()
         if project:
             return project
+
+        # Fallback to legacy slug if different (for backwards compatibility)
+        if legacy_slug != canonical_slug:
+            result = await session.execute(select(Project).where(Project.slug == legacy_slug))  # type: ignore[arg-type]
+            project = result.scalars().first()
+            if project:
+                logger.info(
+                    "Project found via legacy slug '%s' (canonical: '%s'). "
+                    "Consider migrating to canonical form.",
+                    legacy_slug,
+                    canonical_slug,
+                )
+                return project
 
     # Project not found - provide helpful suggestions
     suggestions = await _find_similar_projects(identifier)
@@ -1466,7 +1506,8 @@ async def _get_project_by_identifier(identifier: str) -> Project:
             recoverable=True,
             data={
                 "identifier": identifier,
-                "slug_searched": slug,
+                "slug_searched": canonical_slug,
+                "legacy_slug": legacy_slug if legacy_slug != canonical_slug else None,
                 "suggestions": [{"slug": s[0], "human_key": s[1], "score": round(s[2], 2)} for s in suggestions],
             },
         )
@@ -1477,7 +1518,11 @@ async def _get_project_by_identifier(identifier: str) -> Project:
             f"Use ensure_project to create a new project first. "
             f"Example: ensure_project(human_key='/path/to/your/project')",
             recoverable=True,
-            data={"identifier": identifier, "slug_searched": slug},
+            data={
+                "identifier": identifier,
+                "slug_searched": canonical_slug,
+                "legacy_slug": legacy_slug if legacy_slug != canonical_slug else None,
+            },
         )
 
 
@@ -3876,6 +3921,15 @@ def build_mcp_server() -> FastMCP:
         settings_local = get_settings()
         # Allow ack-required messages to bypass contact enforcement entirely
         if settings_local.contact_enforcement_enabled and not ack_required:
+            logger.debug(
+                "contact_enforcement.start",
+                extra={
+                    "sender": sender.name,
+                    "project": project.human_key,
+                    "recipients": to + (cc or []) + (bcc or []),
+                    "enforcement_enabled": True,
+                },
+            )
             # allow replies always; if thread present and recipient already on thread, allow
             auto_ok_names: set[str] = set()
             if thread_id:
@@ -3887,8 +3941,8 @@ def build_mcp_server() -> FastMCP:
                     try:
                         seed_id = int(thread_id)
                         criteria.append(Message.id == seed_id)
-                    except Exception:
-                        pass
+                    except ValueError:
+                        pass  # Not a numeric thread_id, that's fine
                     async with get_session() as s:
                         stmt = (
                             cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
@@ -3900,8 +3954,16 @@ def build_mcp_server() -> FastMCP:
                     # collect participants (sender names and recipients)
                     participants: set[str] = {n for _m, n in thread_rows}
                     auto_ok_names.update(participants)
-                except Exception:
-                    pass
+                except OperationalError as db_err:
+                    logger.warning(
+                        "contact_enforcement.thread_lookup_db_error",
+                        extra={"thread_id": thread_id, "error": str(db_err)},
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "contact_enforcement.thread_lookup_failed",
+                        extra={"thread_id": thread_id, "error": type(exc).__name__, "error_message": str(exc)},
+                    )
             # allow recent overlapping file_reservations contact (shared surfaces) by default
             # best-effort: if both agents hold any file_reservation currently active, auto allow
             now_utc = datetime.now(timezone.utc)
@@ -3923,8 +3985,16 @@ def build_mcp_server() -> FastMCP:
                     their = name_to_file_reservations.get(nm, [])
                     if sender_file_reservations and their and _file_reservations_patterns_overlap(sender_file_reservations, their):
                         auto_ok_names.add(nm)
-            except Exception:
-                pass
+            except OperationalError as db_err:
+                logger.warning(
+                    "contact_enforcement.file_reservation_lookup_db_error",
+                    extra={"sender": sender.name, "error": str(db_err)},
+                )
+            except Exception as exc:
+                logger.debug(
+                    "contact_enforcement.file_reservation_lookup_failed",
+                    extra={"sender": sender.name, "error": type(exc).__name__, "error_message": str(exc)},
+                )
             # For each recipient, require link unless policy/open or in auto_ok
             blocked_recipients: list[str] = []
             async with get_session() as s3:
@@ -3934,7 +4004,17 @@ def build_mcp_server() -> FastMCP:
                     # recipient lookup
                     try:
                         rec = await _get_agent(project, nm)
-                    except Exception:
+                    except NoResultFound:
+                        logger.debug(
+                            "contact_enforcement.recipient_not_found",
+                            extra={"recipient": nm, "project": project.human_key},
+                        )
+                        continue
+                    except Exception as exc:
+                        logger.debug(
+                            "contact_enforcement.recipient_lookup_failed",
+                            extra={"recipient": nm, "error": type(exc).__name__, "error_message": str(exc)},
+                        )
                         continue
                     rec_policy = getattr(rec, "contact_policy", "auto").lower()
                     # allow self always
@@ -3943,6 +4023,10 @@ def build_mcp_server() -> FastMCP:
                     if rec_policy == "open":
                         continue
                     if rec_policy == "block_all":
+                        logger.debug(
+                            "contact_enforcement.blocked_by_policy",
+                            extra={"sender": sender.name, "recipient": rec.name, "blocked_reason": "block_all"},
+                        )
                         await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
                         raise ToolExecutionError(
                             "CONTACT_BLOCKED",
@@ -3970,7 +4054,17 @@ def build_mcp_server() -> FastMCP:
                         )
                         row = await s3.execute(q, {"pid": project.id, "since": since_dt, "sid": sender.id, "sname": sender.name, "rname": rec.name})
                         recent_ok = row.first() is not None
-                    except Exception:
+                    except OperationalError as db_err:
+                        logger.warning(
+                            "contact_enforcement.ttl_check_db_error",
+                            extra={"sender": sender.name, "recipient": rec.name, "error": str(db_err)},
+                        )
+                        recent_ok = False
+                    except Exception as exc:
+                        logger.debug(
+                            "contact_enforcement.ttl_check_failed",
+                            extra={"sender": sender.name, "recipient": rec.name, "error": type(exc).__name__},
+                        )
                         recent_ok = False
                     if rec_policy == "auto" and recent_ok:
                         continue
@@ -3989,11 +4083,28 @@ def build_mcp_server() -> FastMCP:
                         )
                         if link.first() is not None:
                             continue
-                    except Exception:
-                        pass
+                    except OperationalError as db_err:
+                        logger.warning(
+                            "contact_enforcement.agentlink_check_db_error",
+                            extra={"sender": sender.name, "recipient": rec.name, "error": str(db_err)},
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "contact_enforcement.agentlink_check_failed",
+                            extra={"sender": sender.name, "recipient": rec.name, "error": type(exc).__name__},
+                        )
                     # If message requires acknowledgement and recipient is local, allow to proceed without a link
                     if ack_required:
                         continue
+                    logger.debug(
+                        "contact_enforcement.recipient_blocked",
+                        extra={
+                            "sender": sender.name,
+                            "recipient": rec.name,
+                            "blocked_reason": "no_approved_link",
+                            "policy": rec_policy,
+                        },
+                    )
                     blocked_recipients.append(rec.name)
 
             if blocked_recipients:
@@ -4005,6 +4116,15 @@ def build_mcp_server() -> FastMCP:
                 # Respect explicit flag or server default ergonomics
                 effective_auto_contact: bool = bool(auto_contact_if_blocked or getattr(settings_local, "messaging_auto_handshake_on_block", True))
                 if effective_auto_contact:
+                    CONTACT_METRICS["auto_handshake_calls"] += 1
+                    logger.debug(
+                        "contact_enforcement.auto_handshake_start",
+                        extra={
+                            "sender": sender.name,
+                            "blocked_recipients": blocked_recipients,
+                            "auto_contact_enabled": True,
+                        },
+                    )
                     try:
                         from fastmcp.tools.tool import FunctionTool  # type: ignore
                         # Prefer a single handshake with auto_accept=true
@@ -4020,8 +4140,33 @@ def build_mcp_server() -> FastMCP:
                                     "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
                                 })
                                 attempted.append(nm)
-                            except Exception:
-                                pass
+                                CONTACT_METRICS["auto_handshake_success"] += 1
+                                logger.debug(
+                                    "contact_enforcement.auto_handshake_success",
+                                    extra={"sender": sender.name, "target": nm},
+                                )
+                            except ToolExecutionError as tool_err:
+                                CONTACT_METRICS["auto_handshake_error"] += 1
+                                logger.warning(
+                                    "contact_enforcement.auto_handshake_tool_error",
+                                    extra={
+                                        "sender": sender.name,
+                                        "target": nm,
+                                        "error_type": tool_err.error_type,
+                                        "error": str(tool_err),
+                                    },
+                                )
+                            except Exception as exc:
+                                CONTACT_METRICS["auto_handshake_error"] += 1
+                                logger.warning(
+                                    "contact_enforcement.auto_handshake_failed",
+                                    extra={
+                                        "sender": sender.name,
+                                        "target": nm,
+                                        "error": type(exc).__name__,
+                                        "error_message": str(exc),
+                                    },
+                                )
 
                         # If auto-retry is enabled and at least one handshake happened, re-evaluate recipients once
                         if settings_local.contact_auto_retry_enabled and attempted:
@@ -4030,7 +4175,13 @@ def build_mcp_server() -> FastMCP:
                                 for nm in to + (cc or []) + (bcc or []):
                                     try:
                                         rec = await _get_agent(project, nm)
-                                    except Exception:
+                                    except NoResultFound:
+                                        continue
+                                    except Exception as exc:
+                                        logger.debug(
+                                            "contact_enforcement.retry_recipient_lookup_failed",
+                                            extra={"recipient": nm, "error": type(exc).__name__},
+                                        )
                                         continue
                                     if rec.name == sender.name:
                                         continue
@@ -4051,9 +4202,28 @@ def build_mcp_server() -> FastMCP:
                                     )
                                     if link.first() is None and not ack_required:
                                         blocked_recipients.append(rec.name)
-                    except Exception:
-                        pass
+                    except ImportError as ie:
+                        CONTACT_METRICS["auto_handshake_error"] += 1
+                        logger.warning(
+                            "contact_enforcement.auto_handshake_import_error",
+                            extra={"error": str(ie)},
+                        )
+                    except Exception as exc:
+                        CONTACT_METRICS["auto_handshake_error"] += 1
+                        logger.warning(
+                            "contact_enforcement.auto_handshake_outer_failed",
+                            extra={"error": type(exc).__name__, "error_message": str(exc)},
+                        )
                 if blocked_recipients:
+                    CONTACT_METRICS["enforcement_blocked"] += 1
+                    logger.debug(
+                        "contact_enforcement.final_blocked",
+                        extra={
+                            "sender": sender.name,
+                            "blocked_recipients": blocked_recipients,
+                            "auto_handshake_attempted": attempted,
+                        },
+                    )
                     err_type: str = "CONTACT_REQUIRED"
                     blocked_sorted = sorted(set(blocked_recipients))
                     recipient_list = ", ".join(blocked_sorted)
@@ -4113,8 +4283,11 @@ def build_mcp_server() -> FastMCP:
                                     }
                                 )
                             err_data["suggested_tool_calls"] = examples
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug(
+                            "contact_enforcement.error_data_build_failed",
+                            extra={"error": type(exc).__name__},
+                        )
                     await ctx.error(f"{err_type}: {err_msg}")
                     raise ToolExecutionError(
                         err_type,
@@ -7436,6 +7609,7 @@ def build_mcp_server() -> FastMCP:
         return {
             "generated_at": _iso(datetime.now(timezone.utc)),
             "tools": _tool_metrics_snapshot(),
+            "contact_enforcement": dict(CONTACT_METRICS),
         }
 
     @mcp.resource("resource://tooling/locks", mime_type="application/json")

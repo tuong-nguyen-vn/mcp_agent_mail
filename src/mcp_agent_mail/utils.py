@@ -172,6 +172,73 @@ def slugify(value: str) -> str:
     return slug or "project"
 
 
+# Regex for WSL path pattern: /mnt/<drive>/... or /mnt/<drive>
+_WSL_PATH_RE = re.compile(r"^/mnt/([a-zA-Z])(?:/(.*))?$")
+
+
+def canonicalize_project_identifier(identifier: str) -> str:
+    """Normalize path identifiers for consistent project lookup.
+
+    Handles WSL/Windows path equivalence so the same physical directory
+    produces the same canonical form regardless of access path:
+
+    - /mnt/c/foo → c:/foo
+    - C:\\foo → c:/foo
+    - c:/foo → c:/foo (already canonical)
+    - /home/user/project → /home/user/project (Linux passthrough)
+
+    The canonical form uses:
+    - Lowercase drive letters
+    - Forward slashes only
+    - No trailing slashes (except root)
+    - Collapsed repeated slashes
+
+    Args:
+        identifier: A path string or project identifier.
+
+    Returns:
+        Canonicalized identifier string.
+    """
+    if not identifier:
+        return identifier
+
+    # Strip whitespace
+    result = identifier.strip()
+    if not result:
+        return result
+
+    # Normalize all backslashes to forward slashes
+    result = result.replace("\\", "/")
+
+    # Collapse repeated slashes (but preserve leading // for UNC if needed)
+    while "//" in result:
+        result = result.replace("//", "/")
+
+    # Check for WSL path: /mnt/c/... → c:/...
+    wsl_match = _WSL_PATH_RE.match(result)
+    if wsl_match:
+        drive = wsl_match.group(1).lower()
+        rest = wsl_match.group(2)
+        result = f"{drive}:/{rest}" if rest else f"{drive}:/"
+
+    # Check for Windows drive letter path: C:/... or C:...
+    # Match pattern like "C:/" or "C:" at start
+    elif len(result) >= 2 and result[1] == ":" and result[0].isalpha():
+        drive = result[0].lower()
+        rest = result[2:]
+        # Ensure path starts with / after drive
+        if rest and not rest.startswith("/"):
+            rest = "/" + rest
+        result = f"{drive}:{rest}" if rest else f"{drive}:/"
+
+    # Remove trailing slash unless it's a root path
+    # Keep trailing slash for drive roots like "c:/"
+    if len(result) > 1 and result.endswith("/") and not (len(result) == 3 and result[1] == ":"):
+        result = result.rstrip("/")
+
+    return result
+
+
 def generate_agent_name() -> str:
     """Return a random adjective+noun combination."""
     adjective = random.choice(tuple(ADJECTIVES))
