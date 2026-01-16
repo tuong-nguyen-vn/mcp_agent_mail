@@ -192,10 +192,16 @@ def _execute_tool_call(tool_name: str, args_json: str, pretty: bool) -> None:
 
     async def _call_tool() -> Any:
         await ensure_schema()
-        tool_func = mcp._tool_manager._tools[tool_name].fn
-        ctx = CLIContext(verbose=pretty)
-        result = await tool_func(ctx, **arguments)
-        return _unwrap_result(result)
+        try:
+            tool_func = mcp._tool_manager._tools[tool_name].fn
+            ctx = CLIContext(verbose=pretty)
+            result = await tool_func(ctx, **arguments)
+            return _unwrap_result(result)
+        finally:
+            from .db import get_engine
+            with suppress(Exception):
+                engine = get_engine()
+                await engine.dispose()
 
     try:
         result = asyncio.run(_call_tool())
