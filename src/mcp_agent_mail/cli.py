@@ -67,6 +67,7 @@ from .share import (
     summarize_snapshot,
 )
 from .storage import ensure_archive
+from .tool_runner import run_mcp_tool_json
 from .utils import slugify
 
 # Suppress annoying bleach CSS sanitizer warning from dependencies
@@ -126,6 +127,263 @@ docs_app = typer.Typer(help="Documentation helpers for agent onboarding")
 app.add_typer(docs_app, name="docs")
 doctor_app = typer.Typer(help="Diagnose and repair mailbox health issues")
 app.add_typer(doctor_app, name="doctor")
+
+
+# =============================================================================
+# MCP Tool CLI Wrappers
+# =============================================================================
+# These commands allow invoking MCP tools directly from CLI without running
+# the MCP server. This enables orchestrator/worker skills to use commands like:
+#   am ensure_project '{"human_key": "/path/to/project"}'
+#   am register_agent '{"project_key": "/path", "program": "amp", "model": "claude"}'
+# =============================================================================
+
+def _format_tool_result(result: Any) -> None:
+    """Format and print tool result to console."""
+    if isinstance(result, (dict, list)):
+        console.print_json(data=result)
+    elif result is not None:
+        console.print(str(result))
+
+
+@app.command(name="ensure_project")
+def cli_ensure_project(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments: {\"human_key\": \"/path/to/project\"}")],
+) -> None:
+    """Ensure a project exists for the given path."""
+    try:
+        result = run_mcp_tool_json("ensure_project", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="register_agent")
+def cli_register_agent(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments: {\"project_key\": \"...\", \"program\": \"...\", \"model\": \"...\"}")],
+) -> None:
+    """Register an agent identity for a project."""
+    try:
+        result = run_mcp_tool_json("register_agent", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="send_message")
+def cli_send_message(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for send_message tool")],
+) -> None:
+    """Send a message to other agents."""
+    try:
+        result = run_mcp_tool_json("send_message", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="fetch_inbox")
+def cli_fetch_inbox(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for fetch_inbox tool")],
+) -> None:
+    """Fetch inbox messages for an agent."""
+    try:
+        result = run_mcp_tool_json("fetch_inbox", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="search_messages")
+def cli_search_messages(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for search_messages tool")],
+) -> None:
+    """Search messages in a project."""
+    try:
+        result = run_mcp_tool_json("search_messages", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="summarize_thread")
+def cli_summarize_thread(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for summarize_thread tool")],
+) -> None:
+    """Summarize a message thread."""
+    try:
+        result = run_mcp_tool_json("summarize_thread", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="file_reservation_paths")
+def cli_file_reservation_paths(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for file_reservation_paths tool")],
+) -> None:
+    """Reserve file paths for exclusive editing."""
+    try:
+        result = run_mcp_tool_json("file_reservation_paths", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="release_file_reservations")
+def cli_release_file_reservations(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for release_file_reservations tool")],
+) -> None:
+    """Release file reservations held by an agent."""
+    try:
+        result = run_mcp_tool_json("release_file_reservations", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="acknowledge_message")
+def cli_acknowledge_message(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for acknowledge_message tool")],
+) -> None:
+    """Acknowledge receipt of a message."""
+    try:
+        result = run_mcp_tool_json("acknowledge_message", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="reply_message")
+def cli_reply_message(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for reply_message tool")],
+) -> None:
+    """Reply to a message."""
+    try:
+        result = run_mcp_tool_json("reply_message", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="whois")
+def cli_whois(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for whois tool")],
+) -> None:
+    """Look up agent information."""
+    try:
+        result = run_mcp_tool_json("whois", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="list_contacts")
+def cli_list_contacts(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for list_contacts tool")],
+) -> None:
+    """List contacts for an agent."""
+    try:
+        result = run_mcp_tool_json("list_contacts", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="request_contact")
+def cli_request_contact(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for request_contact tool")],
+) -> None:
+    """Request contact with another agent."""
+    try:
+        result = run_mcp_tool_json("request_contact", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="respond_contact")
+def cli_respond_contact(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for respond_contact tool")],
+) -> None:
+    """Respond to a contact request."""
+    try:
+        result = run_mcp_tool_json("respond_contact", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="macro_start_session")
+def cli_macro_start_session(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for macro_start_session tool")],
+) -> None:
+    """Start a new agent session (macro: ensure_project + register_agent)."""
+    try:
+        result = run_mcp_tool_json("macro_start_session", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="macro_file_reservation_cycle")
+def cli_macro_file_reservation_cycle(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for macro_file_reservation_cycle tool")],
+) -> None:
+    """Reserve files, execute callback, release (macro)."""
+    try:
+        result = run_mcp_tool_json("macro_file_reservation_cycle", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="macro_contact_handshake")
+def cli_macro_contact_handshake(
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for macro_contact_handshake tool")],
+) -> None:
+    """Establish bidirectional contact between agents (macro)."""
+    try:
+        result = run_mcp_tool_json("macro_contact_handshake", json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command(name="tool")
+def cli_tool(
+    tool_name: Annotated[str, typer.Argument(help="Name of the MCP tool to invoke")],
+    json_args: Annotated[str, typer.Argument(help="JSON arguments for the tool")] = "{}",
+) -> None:
+    """Invoke any MCP tool by name with JSON arguments.
+
+    Example:
+        am tool ensure_project '{"human_key": "/path/to/project"}'
+        am tool health_check '{}'
+    """
+    try:
+        result = run_mcp_tool_json(tool_name, json_args)
+        _format_tool_result(result)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
 
 
 async def _get_project_record(identifier: str) -> Project:
