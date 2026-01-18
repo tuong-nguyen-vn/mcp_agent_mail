@@ -42,11 +42,11 @@ from sqlalchemy import (
 from sqlalchemy.engine import make_url
 from sqlalchemy.sql import ColumnElement
 
-from .app import _sanitize_fts_query, build_mcp_server
+# Heavy modules (.app, .http) are imported lazily in functions that need them
+# to speed up CLI startup time significantly (~20s -> ~2s).
 from .config import get_settings
 from .db import ensure_schema, get_session
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
-from .http import build_http_app
 from .models import Agent, FileReservation, Message, MessageRecipient, Product, ProductProjectLink, Project
 from .share import (
     DEFAULT_CHUNK_SIZE,
@@ -601,6 +601,9 @@ def products_search(
     """
     Full-text search over messages for all projects linked to a product.
     """
+    # Lazy import to avoid loading heavy dependencies at CLI startup
+    from .app import _sanitize_fts_query
+
     # Sanitize query before executing
     sanitized_query = _sanitize_fts_query(query)
     if sanitized_query is None:
@@ -885,6 +888,10 @@ def serve_http(
     from . import rich_logger
     rich_logger.display_startup_banner(settings, resolved_host, resolved_port, resolved_path)
 
+    # Lazy import heavy modules only when this command is actually invoked
+    from .app import build_mcp_server
+    from .http import build_http_app
+
     server = build_mcp_server()
     app = build_http_app(settings, server)
     # Disable WebSockets: HTTP-only MCP transport. Stay compatible with tests that
@@ -930,6 +937,9 @@ def serve_stdio() -> None:
 
     # Print startup message to stderr (stdout is reserved for MCP protocol)
     print("MCP Agent Mail - Starting stdio transport...", file=sys.stderr)
+
+    # Lazy import heavy modules only when this command is actually invoked
+    from .app import build_mcp_server
 
     server = build_mcp_server()
     server.run(transport="stdio")
