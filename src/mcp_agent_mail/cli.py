@@ -81,6 +81,7 @@ ARCHIVE_STORAGE_DIRNAME = Path("storage_repo")
 DEFAULT_ARCHIVE_SCRUB_PRESET = "archive"
 app = typer.Typer(help="Developer utilities for the MCP Agent Mail service.")
 
+
 # ty currently struggles to type SQLModel-mapped SQLAlchemy expressions.
 # Provide lightweight wrappers to keep type checking focused on our code.
 def select(*entities: Any, **kwargs: Any) -> Any:
@@ -97,6 +98,7 @@ def asc(value: Any) -> Any:
 
 def desc(value: Any) -> Any:
     return _sa_desc(value)
+
 
 _PREVIEW_FORCE_TOKEN = 0
 _PREVIEW_FORCE_LOCK = threading.Lock()
@@ -155,6 +157,7 @@ def _execute_tool_call(tool_name: str, args_json: str, pretty: bool) -> None:
         os.environ["TOOLS_LOG_ENABLED"] = "false"
         # Clear settings cache so the new env var takes effect
         from .config import clear_settings_cache
+
         clear_settings_cache()
 
     from .app import build_mcp_server
@@ -178,7 +181,9 @@ def _execute_tool_call(tool_name: str, args_json: str, pretty: bool) -> None:
             class Session:
                 async def send_log_message(self, *args: Any, **kwargs: Any) -> None:
                     pass
+
             session = Session()
+
         request_context = RequestContext()
 
         def __init__(self, verbose: bool = True) -> None:
@@ -225,6 +230,7 @@ def _execute_tool_call(tool_name: str, args_json: str, pretty: bool) -> None:
             return _unwrap_result(result)
         finally:
             from .db import get_engine
+
             with suppress(Exception):
                 engine = get_engine()
                 await engine.dispose()
@@ -361,6 +367,7 @@ def products_ensure(
                     return {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name, "created_at": prod.created_at}
                 import re as _re
                 import uuid as _uuid
+
                 uid_pattern = _re.compile(r"^[A-Fa-f0-9]{8,64}$")
                 if product_key and uid_pattern.fullmatch(product_key.strip()):
                     uid = product_key.strip().lower()
@@ -373,6 +380,7 @@ def products_ensure(
                 await session.commit()
                 await session.refresh(prod)
                 return {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name, "created_at": prod.created_at}
+
         resp_data = asyncio.run(_ensure_local())
     table = Table(title="Product", show_lines=False)
     table.add_column("Field")
@@ -398,6 +406,7 @@ def products_link(
     """
     Link a project into a product (idempotent).
     """
+
     async def _link() -> dict:
         await ensure_schema()
         prod = await _get_product_record(product_key.strip())
@@ -405,7 +414,10 @@ def products_link(
         async with get_session() as session:
             existing = await session.execute(
                 select(ProductProjectLink).where(
-                    and_(cast(ColumnElement[bool], ProductProjectLink.product_id == prod.id), cast(ColumnElement[bool], ProductProjectLink.project_id == proj.id))
+                    and_(
+                        cast(ColumnElement[bool], ProductProjectLink.product_id == prod.id),
+                        cast(ColumnElement[bool], ProductProjectLink.project_id == proj.id),
+                    )
                 )
             )
             link = existing.scalars().first()
@@ -417,6 +429,7 @@ def products_link(
                 await session.commit()
                 await session.refresh(link)
         return {"product_uid": prod.product_uid, "product_name": prod.name, "project_slug": proj.slug}
+
     res = asyncio.run(_link())
     console.print(f"[green]Linked[/] project '{res['project_slug']}' into product '{res['product_name']}' ({res['product_uid']}).")
 
@@ -428,21 +441,25 @@ def products_status(
     """
     Show product metadata and linked projects.
     """
+
     async def _status() -> tuple[Product, list[Project]]:
         await ensure_schema()
         async with get_session() as session:
-            stmt_prod = select(Product).where(or_(cast(ColumnElement[bool], Product.product_uid == product_key), cast(ColumnElement[bool], Product.name == product_key)))
+            stmt_prod = select(Product).where(
+                or_(cast(ColumnElement[bool], Product.product_uid == product_key), cast(ColumnElement[bool], Product.name == product_key))
+            )
             prod = (await session.execute(stmt_prod)).scalars().first()
             if prod is None:
                 raise typer.BadParameter(f"Product '{product_key}' not found.")
             assert prod.id is not None
             rows = await session.execute(
-                select(Project).join(ProductProjectLink, cast(ColumnElement[bool], ProductProjectLink.project_id == Project.id)).where(
-                    cast(ColumnElement[bool], ProductProjectLink.product_id == prod.id)
-                )
+                select(Project)
+                .join(ProductProjectLink, cast(ColumnElement[bool], ProductProjectLink.project_id == Project.id))
+                .where(cast(ColumnElement[bool], ProductProjectLink.product_id == prod.id))
             )
             projects = list(rows.scalars().all())
             return prod, projects
+
     prod, projects = asyncio.run(_status())
     table = Table(title=f"Product: {prod.name}", show_lines=False)
     table.add_column("Field")
@@ -465,7 +482,14 @@ def products_status(
 def products_search(
     product_key: Annotated[str, typer.Argument(..., help="Product uid or name")],
     query: Annotated[str, typer.Argument(..., help="FTS query")],
-    limit: Annotated[int, typer.Option("--limit", "-l", help="Max results",)] = 20,
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            "-l",
+            help="Max results",
+        ),
+    ] = 20,
 ) -> None:
     """
     Full-text search over messages for all projects linked to a product.
@@ -482,7 +506,9 @@ def products_search(
     async def _run() -> list[dict]:
         await ensure_schema()
         async with get_session() as session:
-            stmt_prod = select(Product).where(or_(cast(ColumnElement[bool], Product.product_uid == product_key), cast(ColumnElement[bool], Product.name == product_key)))
+            stmt_prod = select(Product).where(
+                or_(cast(ColumnElement[bool], Product.product_uid == product_key), cast(ColumnElement[bool], Product.name == product_key))
+            )
             prod = (await session.execute(stmt_prod)).scalars().first()
             if prod is None:
                 raise typer.BadParameter(f"Product '{product_key}' not found.")
@@ -513,6 +539,7 @@ def products_search(
             except Exception:
                 # FTS query failed - return empty results
                 return []
+
     rows = asyncio.run(_run())
     if not rows:
         console.print("[yellow]No results.[/]")
@@ -524,7 +551,13 @@ def products_search(
     t.add_column("from")
     t.add_column("created_ts")
     for r in rows:
-        t.add_row(str(r["project_id"]), str(r["id"]), r["subject"], r["sender_name"], r["created_ts"].isoformat() if hasattr(r["created_ts"], "isoformat") else str(r["created_ts"]))
+        t.add_row(
+            str(r["project_id"]),
+            str(r["id"]),
+            r["subject"],
+            r["sender_name"],
+            r["created_ts"].isoformat() if hasattr(r["created_ts"], "isoformat") else str(r["created_ts"]),
+        )
     console.print(t)
 
 
@@ -532,7 +565,14 @@ def products_search(
 def products_inbox(
     product_key: Annotated[str, typer.Argument(..., help="Product uid or name")],
     agent: Annotated[str, typer.Argument(..., help="Agent name")],
-    limit: Annotated[int, typer.Option("--limit", "-l", help="Max messages",)] = 20,
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            "-l",
+            help="Max messages",
+        ),
+    ] = 20,
     urgent_only: Annotated[bool, typer.Option("--urgent-only/--all", help="Only high/urgent")] = False,
     include_bodies: Annotated[bool, typer.Option("--include-bodies/--no-bodies", help="Include body_md")] = False,
     since_ts: Annotated[Optional[str], typer.Option("--since-ts", help="ISO-8601 timestamp filter")] = None,
@@ -577,41 +617,72 @@ def products_inbox(
         async def _fallback() -> list[dict]:
             await ensure_schema()
             async with get_session() as session:
-                prod = (await session.execute(select(Product).where(or_(cast(ColumnElement[bool], Product.product_uid == product_key), cast(ColumnElement[bool], Product.name == product_key))))).scalars().first()
+                prod = (
+                    (
+                        await session.execute(
+                            select(Product).where(
+                                or_(
+                                    cast(ColumnElement[bool], Product.product_uid == product_key),
+                                    cast(ColumnElement[bool], Product.name == product_key),
+                                )
+                            )
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
                 if prod is None:
                     return []
                 assert prod.id is not None
                 proj_rows = await session.execute(
-                    select(Project).join(ProductProjectLink, cast(ColumnElement[bool], ProductProjectLink.project_id == Project.id)).where(
-                        cast(ColumnElement[bool], ProductProjectLink.product_id == prod.id)
-                    )
+                    select(Project)
+                    .join(ProductProjectLink, cast(ColumnElement[bool], ProductProjectLink.project_id == Project.id))
+                    .where(cast(ColumnElement[bool], ProductProjectLink.product_id == prod.id))
                 )
                 projects = list(proj_rows.scalars().all())
                 items: list[dict] = []
                 for proj in projects:
                     assert proj.id is not None
-                    agent_row = (await session.execute(select(Agent).where(and_(cast(ColumnElement[bool], Agent.project_id == proj.id), cast(ColumnElement[bool], Agent.name == agent))))).scalars().first()
+                    agent_row = (
+                        (
+                            await session.execute(
+                                select(Agent).where(
+                                    and_(cast(ColumnElement[bool], Agent.project_id == proj.id), cast(ColumnElement[bool], Agent.name == agent))
+                                )
+                            )
+                        )
+                        .scalars()
+                        .first()
+                    )
                     if not agent_row:
                         continue
                     assert agent_row.id is not None
                     from sqlalchemy.orm import aliased as _aliased  # local to avoid top-level churn
+
                     sender_alias = _aliased(Agent)
                     stmt = (
                         select(Message, MessageRecipient.kind, sender_alias.name)
                         .join(MessageRecipient, cast(ColumnElement[bool], MessageRecipient.message_id == Message.id))
                         .join(sender_alias, cast(ColumnElement[bool], Message.sender_id == sender_alias.id))
-                        .where(and_(cast(ColumnElement[bool], Message.project_id == proj.id), cast(ColumnElement[bool], MessageRecipient.agent_id == agent_row.id)))
+                        .where(
+                            and_(
+                                cast(ColumnElement[bool], Message.project_id == proj.id),
+                                cast(ColumnElement[bool], MessageRecipient.agent_id == agent_row.id),
+                            )
+                        )
                         .order_by(desc(cast(Any, Message.created_ts)))
                         .limit(limit)
                     )
                     if urgent_only:
                         from typing import Any as _Any
+
                         stmt = stmt.where(cast(_Any, Message.importance).in_(["high", "urgent"]))
                     if since_ts:
                         try:
                             s = since_ts.strip()
                             s = s[:-1] + "+00:00" if s.endswith("Z") else s
                             from datetime import datetime as _dt
+
                             since_dt = _dt.fromisoformat(s)
                             stmt = stmt.where(Message.created_ts > since_dt)
                         except Exception:
@@ -634,6 +705,7 @@ def products_inbox(
                 # Sort desc by created_ts
                 items.sort(key=lambda r: r.get("created_ts") or 0, reverse=True)
                 return items[: max(0, int(limit))]
+
         rows = asyncio.run(_fallback())
     if not rows:
         console.print("[yellow]No messages found.[/]")
@@ -649,7 +721,14 @@ def products_inbox(
         created = r.get("created_ts")
         if hasattr(created, "isoformat"):
             created = created.isoformat()
-        t.add_row(str(r.get("project_id", "")), str(r.get("id", "")), str(r.get("subject", "")), str(r.get("from", "")), str(r.get("importance", "")), str(created or ""))
+        t.add_row(
+            str(r.get("project_id", "")),
+            str(r.get("id", "")),
+            str(r.get("subject", "")),
+            str(r.get("from", "")),
+            str(r.get("importance", "")),
+            str(created or ""),
+        )
     console.print(t)
 
 
@@ -657,7 +736,14 @@ def products_inbox(
 def products_summarize_thread(
     product_key: Annotated[str, typer.Argument(..., help="Product uid or name")],
     thread_id: Annotated[str, typer.Argument(..., help="Thread id or key")],
-    per_thread_limit: Annotated[int, typer.Option("--per-thread-limit", "-n", help="Max messages per thread",)] = 50,
+    per_thread_limit: Annotated[
+        int,
+        typer.Option(
+            "--per-thread-limit",
+            "-n",
+            help="Max messages per thread",
+        ),
+    ] = 50,
     no_llm: Annotated[bool, typer.Option("--no-llm", help="Disable LLM refinement")] = False,
 ) -> None:
     """
@@ -755,14 +841,19 @@ def serve_http(
 
     # Display awesome startup banner with database stats
     from . import rich_logger
+
     rich_logger.display_startup_banner(settings, resolved_host, resolved_port, resolved_path)
 
     from .app import build_mcp_server
+
     server = build_mcp_server()
+    from .http import build_http_app
+
     app = build_http_app(settings, server)
     # Disable WebSockets: HTTP-only MCP transport. Stay compatible with tests that
     # monkeypatch uvicorn.run without the 'ws' parameter.
     import inspect as _inspect
+
     _sig = _inspect.signature(uvicorn.run)
     _kwargs: dict[str, Any] = {"host": resolved_host, "port": resolved_port, "log_level": "info"}
     if "ws" in _sig.parameters:
@@ -907,8 +998,8 @@ def share_export(
             show_default=True,
         ),
     ] = True,
-    signing_key: Annotated[Optional[Path], typer.Option("--signing-key", help="Path to Ed25519 signing key (32-byte seed).")]=None,
-    signing_public_out: Annotated[Optional[Path], typer.Option("--signing-public-out", help="Write public key to this file after signing.")]=None,
+    signing_key: Annotated[Optional[Path], typer.Option("--signing-key", help="Path to Ed25519 signing key (32-byte seed).")] = None,
+    signing_public_out: Annotated[Optional[Path], typer.Option("--signing-public-out", help="Write public key to this file after signing.")] = None,
     age_recipients: Annotated[
         Optional[list[str]],
         typer.Option(
@@ -924,10 +1015,7 @@ def share_export(
         projects = []
     scrub_preset = (scrub_preset or "standard").strip().lower()
     if scrub_preset not in SCRUB_PRESETS:
-        console.print(
-            "[red]Invalid scrub preset:[/] "
-            f"{scrub_preset}. Choose one of: {', '.join(SCRUB_PRESETS)}."
-        )
+        console.print(f"[red]Invalid scrub preset:[/] {scrub_preset}. Choose one of: {', '.join(SCRUB_PRESETS)}.")
         raise typer.Exit(code=1)
     raw_output = _resolve_path(output)
     temp_dir: Optional[tempfile.TemporaryDirectory[str]] = None
@@ -976,9 +1064,7 @@ def share_export(
     console.print(f"[cyan]Creating snapshot:[/] {snapshot_path}")
 
     if detach_threshold <= inline_threshold:
-        console.print(
-            "[yellow]Adjusting detach threshold to exceed inline threshold to avoid conflicts.[/]"
-        )
+        console.print("[yellow]Adjusting detach threshold to exceed inline threshold to avoid conflicts.[/]")
         detach_threshold = inline_threshold + max(1024, inline_threshold // 2 or 1)
 
     hosting_hints = detect_hosting_hints(output_path)
@@ -1106,10 +1192,7 @@ def share_export(
     attachments_manifest = bundle_artifacts.attachments_manifest
     chunk_manifest = bundle_artifacts.chunk_manifest
     if chunk_manifest:
-        console.print(
-            f"[cyan]Chunked database into {chunk_manifest['chunk_count']} files of ~{chunk_manifest['chunk_size']//1024} KiB.[/]"
-        )
-
+        console.print(f"[cyan]Chunked database into {chunk_manifest['chunk_count']} files of ~{chunk_manifest['chunk_size'] // 1024} KiB.[/]")
 
     if signing_key is not None:
         try:
@@ -1120,9 +1203,7 @@ def share_export(
                 output_path,
                 public_out=public_out_path,
             )
-            console.print(
-                f"[green]✓ Signed manifest (Ed25519, public key {signature_info['public_key']})[/]"
-            )
+            console.print(f"[green]✓ Signed manifest (Ed25519, public key {signature_info['public_key']})[/]")
         except ShareExportError as exc:
             console.print(f"[red]Manifest signing failed:[/] {exc}")
             if temp_dir is not None:
@@ -1176,9 +1257,7 @@ def share_export(
     if temp_dir is not None:
         temp_dir.cleanup()
 
-    console.print(
-        "[dim]Next steps: flesh out the static SPA (search, thread detail) and tighten signing/encryption defaults per the roadmap.[/]"
-    )
+    console.print("[dim]Next steps: flesh out the static SPA (search, thread detail) and tighten signing/encryption defaults per the roadmap.[/]")
 
 
 def _list_projects_for_wizard(database_path: Path) -> list[tuple[str, str]]:
@@ -1268,9 +1347,7 @@ def _run_share_export_wizard(
     )
     preset_value = (preset_input or default_scrub_preset).strip().lower()
     if preset_value not in SCRUB_PRESETS:
-        console.print(
-            f"[yellow]Unknown preset '{preset_value}'. Using {default_scrub_preset} instead.[/]"
-        )
+        console.print(f"[yellow]Unknown preset '{preset_value}'. Using {default_scrub_preset} instead.[/]")
         preset_value = default_scrub_preset
 
     zip_bundle = typer.confirm("Package the output directory as a .zip archive?", default=True)
@@ -1289,7 +1366,7 @@ def _run_share_export_wizard(
 def _bump_preview_force_token() -> int:
     global _PREVIEW_FORCE_TOKEN
     with _PREVIEW_FORCE_LOCK:
-        _PREVIEW_FORCE_TOKEN = (_PREVIEW_FORCE_TOKEN + 1) % (2 ** 63)
+        _PREVIEW_FORCE_TOKEN = (_PREVIEW_FORCE_TOKEN + 1) % (2**63)
         return _PREVIEW_FORCE_TOKEN
 
 
@@ -1402,8 +1479,8 @@ def share_update(
         bool,
         typer.Option("--zip/--no-zip", help="Package the updated bundle into a ZIP archive.", show_default=True),
     ] = False,
-    signing_key: Annotated[Optional[Path], typer.Option("--signing-key", help="Path to Ed25519 signing key (32-byte seed).")]=None,
-    signing_public_out: Annotated[Optional[Path], typer.Option("--signing-public-out", help="Write public key to this file after signing.")]=None,
+    signing_key: Annotated[Optional[Path], typer.Option("--signing-key", help="Path to Ed25519 signing key (32-byte seed).")] = None,
+    signing_public_out: Annotated[Optional[Path], typer.Option("--signing-public-out", help="Write public key to this file after signing.")] = None,
     age_recipients: Annotated[
         Optional[list[str]],
         typer.Option(
@@ -1434,10 +1511,7 @@ def share_update(
     project_filters = list(projects) if projects else list(stored_config.projects)
     scrub_preset = (scrub_preset_override or stored_config.scrub_preset or "standard").strip().lower()
     if scrub_preset not in SCRUB_PRESETS:
-        console.print(
-            "[red]Invalid scrub preset override:[/] "
-            f"{scrub_preset}. Choose one of: {', '.join(SCRUB_PRESETS)}."
-        )
+        console.print(f"[red]Invalid scrub preset override:[/] {scrub_preset}. Choose one of: {', '.join(SCRUB_PRESETS)}.")
         raise typer.Exit(code=1)
 
     inline_threshold = inline_threshold_override if inline_threshold_override is not None else stored_config.inline_threshold
@@ -1459,9 +1533,7 @@ def share_update(
         raise typer.Exit(code=1)
 
     if detach_threshold <= inline_threshold:
-        console.print(
-            "[yellow]Adjusting detach threshold to exceed inline threshold to avoid conflicts.[/]"
-        )
+        console.print("[yellow]Adjusting detach threshold to exceed inline threshold to avoid conflicts.[/]")
         detach_threshold = inline_threshold + max(1024, inline_threshold // 2 or 1)
 
     existing_signature = (bundle_path / "manifest.sig.json").exists()
@@ -1552,9 +1624,7 @@ def share_update(
         attachments_manifest = bundle_artifacts.attachments_manifest
         chunk_manifest = bundle_artifacts.chunk_manifest
         if chunk_manifest:
-            console.print(
-                f"[cyan]Chunked database into {chunk_manifest['chunk_count']} files of ~{chunk_manifest['chunk_size']//1024} KiB.[/]"
-            )
+            console.print(f"[cyan]Chunked database into {chunk_manifest['chunk_count']} files of ~{chunk_manifest['chunk_size'] // 1024} KiB.[/]")
 
         console.print(f"[cyan]Synchronizing updated bundle into:[/] {bundle_path}")
         _copy_bundle_contents(temp_path, bundle_path)
@@ -1571,25 +1641,19 @@ def share_update(
                 public_out=public_out_path,
                 overwrite=True,
             )
-            console.print(
-                f"[green]✓ Signed manifest (Ed25519, public key {signature_info['public_key']})[/]"
-            )
+            console.print(f"[green]✓ Signed manifest (Ed25519, public key {signature_info['public_key']})[/]")
         except ShareExportError as exc:
             console.print(f"[red]Manifest signing failed:[/] {exc}")
             raise typer.Exit(code=1) from exc
     elif existing_signature:
-        console.print(
-            "[yellow]Existing manifest signature may no longer match. Re-run with --signing-key to refresh it.[/]"
-        )
+        console.print("[yellow]Existing manifest signature may no longer match. Re-run with --signing-key to refresh it.[/]")
 
     archive_path: Optional[Path] = None
     if zip_bundle:
         archive_path = bundle_path.parent / f"{bundle_path.name}.zip"
         console.print(f"[cyan]Packaging archive:[/] {archive_path}")
         if archive_path.exists():
-            console.print(
-                f"[red]Archive already exists at {archive_path}. Remove it or specify --no-zip to skip packaging.[/]"
-            )
+            console.print(f"[red]Archive already exists at {archive_path}. Remove it or specify --no-zip to skip packaging.[/]")
             raise typer.Exit(code=1)
         try:
             package_directory_as_zip(bundle_path, archive_path)
@@ -2209,10 +2273,7 @@ def _create_mailbox_archive(
                 "directory": str(destination.parent),
             },
             "projects_requested": list(project_filters),
-            "projects_included": [
-                {"slug": record.slug, "human_key": record.human_key}
-                for record in context.scope.projects
-            ],
+            "projects_included": [{"slug": record.slug, "human_key": record.human_key} for record in context.scope.projects],
             "projects_removed": context.scope.removed_count,
             "scrub_preset": scrub_preset,
             "scrub_summary": asdict(context.scrub_summary),
@@ -2233,9 +2294,7 @@ def _create_mailbox_archive(
                 "version": _package_version(),
                 "python": sys.version.split()[0],
             },
-            "notes": [
-                "Restore with `mcp-agent-mail archive restore {filename}`".format(filename=destination.name)
-            ],
+            "notes": ["Restore with `mcp-agent-mail archive restore {filename}`".format(filename=destination.name)],
         }
         temp_zip_path = temp_dir / "mailbox-state.zip"
         with ZipFile(temp_zip_path, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
@@ -2280,9 +2339,7 @@ def archive_save_state(
     project_filters: Sequence[str] = tuple(projects or ())
     preset = (scrub_preset or "standard").strip().lower()
     if preset not in SCRUB_PRESETS:
-        console.print(
-            f"[red]Invalid scrub preset '{scrub_preset}'. Choose one of: {', '.join(SCRUB_PRESETS)}.[/]"
-        )
+        console.print(f"[red]Invalid scrub preset '{scrub_preset}'. Choose one of: {', '.join(SCRUB_PRESETS)}.[/]")
         raise typer.Exit(code=1)
     try:
         archive_path, metadata = _create_mailbox_archive(
@@ -2331,8 +2388,7 @@ def archive_list_states(
             "file": file_path.name,
             "path": str(file_path),
             "size_bytes": file_path.stat().st_size,
-            "created_at": metadata.get("created_at")
-            or datetime.fromtimestamp(file_path.stat().st_mtime, timezone.utc).isoformat(),
+            "created_at": metadata.get("created_at") or datetime.fromtimestamp(file_path.stat().st_mtime, timezone.utc).isoformat(),
             "scrub_preset": metadata.get("scrub_preset", ""),
             "projects": metadata.get("projects_requested") or ["all"],
         }
@@ -2404,13 +2460,9 @@ def archive_restore_state(
     archive_db_path = metadata.get("database", {}).get("source_path")
     archive_storage_path = metadata.get("storage", {}).get("source_path")
     if archive_db_path and archive_db_path != str(database_path):
-        console.print(
-            f"[yellow]Archive was created from database {archive_db_path}, current config is {database_path}. Continuing...[/]"
-        )
+        console.print(f"[yellow]Archive was created from database {archive_db_path}, current config is {database_path}. Continuing...[/]")
     if archive_storage_path and archive_storage_path != str(storage_root):
-        console.print(
-            f"[yellow]Archive used storage root {archive_storage_path}, current config is {storage_root}. Continuing...[/]"
-        )
+        console.print(f"[yellow]Archive used storage root {archive_storage_path}, current config is {storage_root}. Continuing...[/]")
     with tempfile.TemporaryDirectory(prefix="mailbox-restore-") as temp_dir_str:
         temp_dir = Path(temp_dir_str)
         with ZipFile(archive_path, "r") as archive:
@@ -2541,9 +2593,7 @@ def clear_and_reset_everything(
                 status_message="Archiving current mailbox before reset...",
             )
             console.print(f"[green]✓ Saved restore point to:[/] {archived_state}")
-            console.print(
-                f"[dim]Restore later with:[/] mcp-agent-mail archive restore {archived_state.name}"
-            )
+            console.print(f"[dim]Restore later with:[/] mcp-agent-mail archive restore {archived_state.name}")
         except ShareExportError as exc:
             console.print(f"[red]Failed to create archive:[/] {exc}")
             if archive_mandatory:
@@ -2614,9 +2664,7 @@ def list_projects(
             rows: list[tuple[Project, int]] = []
             if include_agents:
                 for project in projects:
-                    count_result = await session.execute(
-                        select(func.count(Agent.id)).where(Agent.project_id == project.id)
-                    )
+                    count_result = await session.execute(select(func.count(Agent.id)).where(Agent.project_id == project.id))
                     count = int(count_result.scalar_one())
                     rows.append((project, count))
             else:
@@ -2643,6 +2691,7 @@ def list_projects(
                 entry["agent_count"] = agent_count
             projects_json.append(entry)
         import sys
+
         json.dump(projects_json, sys.stdout, indent=2)
         sys.stdout.write("\n")
     else:
@@ -2666,7 +2715,13 @@ def list_projects(
 def guard_install(
     project: str,
     repo: Annotated[Path, typer.Argument(..., help="Path to git repo")],
-    prepush: Annotated[bool, typer.Option("--prepush/--no-prepush", help="Also install a pre-push guard.",)] = False,
+    prepush: Annotated[
+        bool,
+        typer.Option(
+            "--prepush/--no-prepush",
+            help="Also install a pre-push guard.",
+        ),
+    ] = False,
 ) -> None:
     """Install the advisory pre-commit guard into the given repository."""
 
@@ -2682,6 +2737,7 @@ def guard_install(
         if prepush:
             try:
                 from .guard import install_prepush_guard as _install_prepush
+
                 await _install_prepush(settings, project_record.slug, repo_path)
             except Exception as exc:
                 console.print(f"[yellow]Warning: failed to install pre-push guard: {exc}[/]")
@@ -2702,6 +2758,7 @@ def guard_uninstall(
 
     repo_path = repo.expanduser().resolve()
     removed = asyncio.run(uninstall_guard_script(repo_path))
+
     # Resolve hooks directory for accurate messaging
     def _git(cwd: Path, *args: str) -> str | None:
         try:
@@ -2709,9 +2766,10 @@ def guard_uninstall(
             return cp.stdout.strip()
         except Exception:
             return None
+
     hooks_path = _git(repo_path, "config", "--get", "core.hooksPath")
     if hooks_path:
-        if hooks_path.startswith("/") or (((((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/")))):
+        if hooks_path.startswith("/") or (((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/")):
             hooks_dir = Path(hooks_path)
         else:
             root = _git(repo_path, "rev-parse", "--show-toplevel") or str(repo_path)
@@ -2743,8 +2801,10 @@ def file_reservations_list(
             raise ValueError("Project must have an id")
         await ensure_schema()
         async with get_session() as session:
-            stmt = select(FileReservation, Agent.name).join(Agent, cast(ColumnElement[bool], FileReservation.agent_id == Agent.id)).where(
-                cast(ColumnElement[bool], FileReservation.project_id == project_record.id)
+            stmt = (
+                select(FileReservation, Agent.name)
+                .join(Agent, cast(ColumnElement[bool], FileReservation.agent_id == Agent.id))
+                .where(cast(ColumnElement[bool], FileReservation.project_id == project_record.id))
             )
             if active_only:
                 stmt = stmt.where(cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)))
@@ -2775,9 +2835,17 @@ def file_reservations_list(
         )
     console.print(table)
 
+
 @amctl_app.command("env")
 def amctl_env(
-    project_path: Annotated[Path, typer.Option("--path", "-p", help="Path to repo/worktree",)] = Path(),
+    project_path: Annotated[
+        Path,
+        typer.Option(
+            "--path",
+            "-p",
+            help="Path to repo/worktree",
+        ),
+    ] = Path(),
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Agent name (defaults to $AGENT_NAME)")] = None,
 ) -> None:
     """
@@ -2787,6 +2855,7 @@ def amctl_env(
     agent_name = agent or os.environ.get("AGENT_NAME") or "Unknown"
     # Reuse server helper for identity
     from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
+
     ident = _resolve_ident(str(p))
     slug = ident["slug"]
     project_uid = ident["project_uid"]
@@ -2796,6 +2865,7 @@ def amctl_env(
         repo = None
         try:
             from git import Repo as _Repo
+
             repo = _Repo(str(p), search_parent_directories=True)
             try:
                 branch = repo.active_branch.name
@@ -2824,11 +2894,26 @@ def amctl_env(
 def am_run(
     slot: Annotated[str, typer.Argument(help="Build slot name (e.g., frontend-build)")],
     cmd: Annotated[list[str], typer.Argument(help="Command to run")],
-    project_path: Annotated[Path, typer.Option("--path", "-p", help="Path to repo/worktree",)] = Path(),
+    project_path: Annotated[
+        Path,
+        typer.Option(
+            "--path",
+            "-p",
+            help="Path to repo/worktree",
+        ),
+    ] = Path(),
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Agent name (defaults to $AGENT_NAME)")] = None,
     ttl_seconds: Annotated[int, typer.Option("--ttl-seconds", help="Lease TTL seconds (default 3600)")] = 3600,
-    shared: Annotated[bool, typer.Option("--shared/--exclusive", help="Shared (non-exclusive) lease",)] = False,
-    block_on_conflicts: Annotated[bool, typer.Option("--block-on-conflicts/--no-block-on-conflicts", help="Exit 1 if exclusive conflicts are present")] = False,
+    shared: Annotated[
+        bool,
+        typer.Option(
+            "--shared/--exclusive",
+            help="Shared (non-exclusive) lease",
+        ),
+    ] = False,
+    block_on_conflicts: Annotated[
+        bool, typer.Option("--block-on-conflicts/--no-block-on-conflicts", help="Exit 1 if exclusive conflicts are present")
+    ] = False,
 ) -> None:
     """
     Build wrapper that prepares environment variables and manages a build slot:
@@ -2839,6 +2924,7 @@ def am_run(
     p = project_path.expanduser().resolve()
     agent_name = agent or os.environ.get("AGENT_NAME") or "Unknown"
     from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
+
     ident = _resolve_ident(str(p))
     slug = ident["slug"]
     project_uid = ident["project_uid"]
@@ -2849,6 +2935,7 @@ def am_run(
         repo = None
         try:
             from git import Repo as _Repo
+
             repo = _Repo(str(p), search_parent_directories=True)
             try:
                 branch = repo.active_branch.name
@@ -2868,7 +2955,7 @@ def am_run(
 
     def _safe_component(value: str) -> str:
         s = value.strip()
-        for ch in ("/", "\\\\", ":", "*", "?", "\"", "<", ">", "|", " "):
+        for ch in ("/", "\\\\", ":", "*", "?", '"', "<", ">", "|", " "):
             s = s.replace(ch, "_")
         return s or "unknown"
 
@@ -2899,6 +2986,7 @@ def am_run(
     def _lease_path(slot_dir: Path) -> Path:
         holder = _safe_component(f"{agent_name}__{branch or 'unknown'}")
         return slot_dir / f"{holder}.json"
+
     # Ensure local lease path exists upfront so tests can observe it even if server path is used
     lease_path: Optional[Path] = None
     try:
@@ -2917,14 +3005,16 @@ def am_run(
     except Exception:
         pass
     env = os.environ.copy()
-    env.update({
-        "AM_SLOT": slot,
-        "SLUG": slug,
-        "PROJECT_UID": project_uid or "",
-        "BRANCH": branch,
-        "AGENT": agent_name,
-        "CACHE_KEY": f"am-cache-{project_uid}-{agent_name}-{branch}",
-    })
+    env.update(
+        {
+            "AM_SLOT": slot,
+            "SLUG": slug,
+            "PROJECT_UID": project_uid or "",
+            "BRANCH": branch,
+            "AGENT": agent_name,
+            "CACHE_KEY": f"am-cache-{project_uid}-{agent_name}-{branch}",
+        }
+    )
     # lease_path may already be set by eager creation above
     renew_stop = threading.Event()
     renew_thread: Optional[threading.Thread] = None
@@ -2980,8 +3070,7 @@ def am_run(
                     console.print("[yellow]Build slot conflicts (server advisory, proceeding):[/]")
                     for c in conflicts:
                         console.print(
-                            f"  - slot={c.get('slot','')} agent={c.get('agent','')} "
-                            f"branch={c.get('branch','')} expires={c.get('expires_ts','')}"
+                            f"  - slot={c.get('slot', '')} agent={c.get('agent', '')} branch={c.get('branch', '')} expires={c.get('expires_ts', '')}"
                         )
                 if conflicts and (not shared) and block_on_conflicts:
                     console.print("[red]Build slot conflicts detected and --block-on-conflicts set; aborting.[/]")
@@ -3020,15 +3109,13 @@ def am_run(
                 slot_dir = asyncio.run(_ensure_slot_paths())
                 active = _read_active(slot_dir)
                 conflicts = [
-                    e for e in active
-                    if e.get("exclusive", True) and not shared and not (e.get("agent") == agent_name and e.get("branch") == branch)
+                    e for e in active if e.get("exclusive", True) and not shared and not (e.get("agent") == agent_name and e.get("branch") == branch)
                 ]
                 if conflicts and guard_mode == "warn":
                     console.print("[yellow]Build slot conflicts (advisory, proceeding):[/]")
                     for c in conflicts:
                         console.print(
-                            f"  - slot={c.get('slot','')} agent={c.get('agent','')} "
-                            f"branch={c.get('branch','')} expires={c.get('expires_ts','')}"
+                            f"  - slot={c.get('slot', '')} agent={c.get('agent', '')} branch={c.get('branch', '')} expires={c.get('expires_ts', '')}"
                         )
                 if conflicts and (not shared) and block_on_conflicts:
                     console.print("[red]Build slot conflicts detected and --block-on-conflicts set; aborting.[/]")
@@ -3060,6 +3147,7 @@ def am_run(
                                 lease_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
                         except Exception:
                             continue
+
                 renew_thread = threading.Thread(target=_renewer, name="am-run-renew", daemon=True)
                 renew_thread.start()
         console.print(f"[cyan]$ {' '.join(cmd)}[/]  [dim](slot={slot})[/]")
@@ -3104,6 +3192,7 @@ def am_run(
     if rc != 0:
         raise typer.Exit(code=rc)
 
+
 @projects_app.command("mark-identity")
 def projects_mark_identity(
     project_path: Annotated[Path, typer.Argument(..., help="Path to repo/worktree ('.' for current)")],
@@ -3114,6 +3203,7 @@ def projects_mark_identity(
     """
     p = project_path.expanduser().resolve()
     from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
+
     ident = _resolve_ident(str(p))
     uid = ident.get("project_uid") or ""
     if not uid:
@@ -3122,6 +3212,7 @@ def projects_mark_identity(
     repo = None
     try:
         from git import Repo as _Repo
+
         repo = _Repo(str(p), search_parent_directories=True)
         root = Path(repo.working_tree_dir or str(p))
     except Exception:
@@ -3152,6 +3243,7 @@ def projects_discovery_init(
     """
     p = project_path.expanduser().resolve()
     from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
+
     ident = _resolve_ident(str(p))
     uid = ident.get("project_uid") or ""
     if not uid:
@@ -3162,6 +3254,8 @@ def projects_discovery_init(
         lines.append(f"product_uid: {product}")
     ypath.write_text("\n".join(lines) + "\n", encoding="utf-8")
     console.print(f"[green]Wrote[/] {ypath}")
+
+
 @mail_app.command("status")
 def mail_status(
     project_path: Annotated[
@@ -3189,9 +3283,10 @@ def mail_status(
                 path = u.split(":", 1)[1]
             else:
                 from urllib.parse import urlparse as _urlparse
+
                 pr = _urlparse(u)
                 host = pr.hostname or ""
-                path = (pr.path or "")
+                path = pr.path or ""
         except Exception:
             return None
         if not host:
@@ -3209,6 +3304,7 @@ def mail_status(
     repo = None
     try:
         from git import Repo as _Repo  # local import to avoid CLI startup cost
+
         repo = _Repo(str(p), search_parent_directories=True)
         try:
             url = repo.git.remote("get-url", remote_name).strip() or None
@@ -3228,6 +3324,7 @@ def mail_status(
 
     # Compute a candidate slug using the same logic as the server helper (summarized)
     from mcp_agent_mail.app import _compute_project_slug as _compute_slug
+
     slug_value = _compute_slug(str(p))
 
     table = Table(title="Mail routing status", show_lines=False)
@@ -3264,7 +3361,7 @@ def guard_status(
 
     hooks_path = _git(p, "config", "--get", "core.hooksPath")
     if hooks_path:
-        if hooks_path.startswith("/") or ((((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/"))):
+        if hooks_path.startswith("/") or (((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/")):
             hooks_dir = Path(hooks_path)
         else:
             root = _git(p, "rev-parse", "--show-toplevel") or str(p)
@@ -3289,6 +3386,7 @@ def guard_status(
     table.add_row("pre-commit", "present" if pre_commit.exists() else "missing")
     table.add_row("pre-push", "present" if pre_push.exists() else "missing")
     console.print(table)
+
 
 @guard_app.command("check")
 def guard_check(
@@ -3426,6 +3524,7 @@ def guard_check(
             raise typer.Exit(code=1)
     raise typer.Exit(code=0)
 
+
 @projects_app.command("adopt")
 def projects_adopt(
     source: Annotated[str, typer.Argument(..., help="Old project slug or human key")],
@@ -3435,12 +3534,15 @@ def projects_adopt(
     """
     Plan and optionally apply consolidation of legacy per-worktree projects into a canonical project.
     """
+
     async def _load(slug_or_key: str) -> Project:
         return await _get_project_record(slug_or_key)
 
     try:
+
         async def _both() -> tuple[Project, Project]:
             return await asyncio.gather(_load(source), _load(target))
+
         src, dst = asyncio.run(_both())
     except Exception as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -3473,6 +3575,7 @@ def projects_adopt(
     # Describe filesystem moves (archive layout)
     settings = get_settings()
     from .storage import ensure_archive as _ensure_archive
+
     src_archive = asyncio.run(_ensure_archive(settings, src.slug))
     dst_archive = asyncio.run(_ensure_archive(settings, dst.slug))
     plan.append(f"Move Git artifacts: {src_archive.root} -> {dst_archive.root}")
@@ -3485,6 +3588,7 @@ def projects_adopt(
 
     if dry_run:
         return
+
     # Apply phase
     async def _apply() -> None:
         if src.id is None or dst.id is None:
@@ -3492,8 +3596,12 @@ def projects_adopt(
         # Detect agent name conflicts
         await ensure_schema()
         async with get_session() as session:
-            src_agents = [row[0] for row in (await session.execute(select(Agent.name).where(cast(ColumnElement[bool], Agent.project_id == src.id)))).all()]
-            dst_agents = [row[0] for row in (await session.execute(select(Agent.name).where(cast(ColumnElement[bool], Agent.project_id == dst.id)))).all()]
+            src_agents = [
+                row[0] for row in (await session.execute(select(Agent.name).where(cast(ColumnElement[bool], Agent.project_id == src.id)))).all()
+            ]
+            dst_agents = [
+                row[0] for row in (await session.execute(select(Agent.name).where(cast(ColumnElement[bool], Agent.project_id == dst.id)))).all()
+            ]
             dup = sorted(set(src_agents).intersection(set(dst_agents)))
             if dup:
                 raise typer.BadParameter(f"Agent name conflicts in target project: {', '.join(dup)}")
@@ -3501,6 +3609,7 @@ def projects_adopt(
         settings = get_settings()
         # local import to minimize top-level churn and keep ordering stable
         from .storage import AsyncFileLock as _AsyncFileLock, ensure_archive as _ensure_archive
+
         src_archive = asyncio.run(_ensure_archive(settings, src.slug))
         dst_archive = asyncio.run(_ensure_archive(settings, dst.slug))
         moved_relpaths: list[str] = []
@@ -3519,14 +3628,18 @@ def projects_adopt(
             await asyncio.to_thread(path.replace, dest_path)
             moved_relpaths.append(dest_path.relative_to(dst_archive.repo_root).as_posix())
         from .storage import _commit as _archive_commit
+
         async with _AsyncFileLock(dst_archive.lock_path):
             await _archive_commit(dst_archive.repo, settings, f"adopt: move {src.slug} into {dst.slug}", moved_relpaths)
         # Re-key database rows (agents, messages, file_reservations)
         async with get_session() as session:
             from sqlalchemy import update as _update  # local import to avoid top-of-file churn
+
             await session.execute(_update(Agent).where(cast(ColumnElement[bool], Agent.project_id == src.id)).values(project_id=dst.id))
             await session.execute(_update(Message).where(cast(ColumnElement[bool], Message.project_id == src.id)).values(project_id=dst.id))
-            await session.execute(_update(FileReservation).where(cast(ColumnElement[bool], FileReservation.project_id == src.id)).values(project_id=dst.id))
+            await session.execute(
+                _update(FileReservation).where(cast(ColumnElement[bool], FileReservation.project_id == src.id)).values(project_id=dst.id)
+            )
             await session.commit()
         # Write aliases.json under target
         aliases_path = dst_archive.root / "aliases.json"
@@ -3566,7 +3679,12 @@ def file_reservations_active(
             stmt = (
                 select(FileReservation, Agent.name)
                 .join(Agent, cast(ColumnElement[bool], FileReservation.agent_id == Agent.id))
-                .where(and_(cast(ColumnElement[bool], FileReservation.project_id == project_record.id), cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None))))
+                .where(
+                    and_(
+                        cast(ColumnElement[bool], FileReservation.project_id == project_record.id),
+                        cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)),
+                    )
+                )
                 .order_by(asc(cast(Any, FileReservation.expires_ts)))
                 .limit(limit)
             )
@@ -3628,7 +3746,7 @@ def file_reservations_soon(
                 .where(
                     and_(
                         cast(ColumnElement[bool], FileReservation.project_id == project_record.id),
-                        cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None))
+                        cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)),
                     )
                 )
                 .order_by(asc(cast(Any, FileReservation.expires_ts)))
@@ -3673,6 +3791,7 @@ def file_reservations_soon(
         )
     console.print(table)
 
+
 @acks_app.command("pending")
 def acks_pending(
     project: str = typer.Argument(..., help="Project slug or human key"),
@@ -3696,7 +3815,7 @@ def acks_pending(
                         cast(ColumnElement[bool], Message.project_id == project_record.id),
                         cast(ColumnElement[bool], MessageRecipient.agent_id == agent_record.id),
                         cast(ColumnElement[bool], cast(Any, Message.ack_required).is_(True)),
-                        cast(ColumnElement[bool], cast(Any, MessageRecipient.ack_ts).is_(None))
+                        cast(ColumnElement[bool], cast(Any, MessageRecipient.ack_ts).is_(None)),
                     )
                 )
                 .order_by(desc(cast(Any, Message.created_ts)))
@@ -3720,6 +3839,7 @@ def acks_pending(
     table.add_column("Ack Age")
 
     now = datetime.now(timezone.utc)
+
     def _age(dt: datetime) -> str:
         # Coerce naive datetimes from SQLite to UTC for arithmetic
         if dt.tzinfo is None:
@@ -3768,7 +3888,7 @@ def acks_remind(
                         cast(ColumnElement[bool], Message.project_id == project_record.id),
                         cast(ColumnElement[bool], MessageRecipient.agent_id == agent_record.id),
                         cast(ColumnElement[bool], cast(Any, Message.ack_required).is_(True)),
-                        cast(ColumnElement[bool], cast(Any, MessageRecipient.ack_ts).is_(None))
+                        cast(ColumnElement[bool], cast(Any, MessageRecipient.ack_ts).is_(None)),
                     )
                 )
                 .order_by(asc(cast(Any, Message.created_ts)))  # oldest first
@@ -3784,8 +3904,10 @@ def acks_remind(
 
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=min_age_minutes)
+
     def _aware(dt: datetime) -> datetime:
         return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
     stale = [(m, rts, ats, k) for (m, rts, ats, k) in rows if _aware(m.created_ts) <= cutoff]
 
     table = Table(title=f"ACK Reminders (>{min_age_minutes}m) for {agent_record.name}")
@@ -3846,7 +3968,7 @@ def acks_overdue(
                         cast(ColumnElement[bool], MessageRecipient.agent_id == agent_record.id),
                         cast(ColumnElement[bool], cast(Any, Message.ack_required).is_(True)),
                         cast(ColumnElement[bool], cast(Any, MessageRecipient.ack_ts).is_(None)),
-                        cast(ColumnElement[bool], Message.created_ts <= cutoff)
+                        cast(ColumnElement[bool], Message.created_ts <= cutoff),
                     )
                 )
                 .order_by(asc(cast(Any, Message.created_ts)))
@@ -3868,6 +3990,7 @@ def acks_overdue(
     table.add_column("Kind")
 
     now = datetime.now(timezone.utc)
+
     def _age(dt: datetime) -> str:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -3891,9 +4014,6 @@ def acks_overdue(
         console.print(table)
 
 
-
-
-
 @app.command("list-acks")
 def list_acks(
     project_key: str = typer.Option(..., "--project", help="Project human key or slug."),
@@ -3906,7 +4026,11 @@ def list_acks(
         await ensure_schema()
         async with get_session() as session:
             # Resolve project and agent
-            proj_result = await session.execute(select(Project).where(or_(cast(ColumnElement[bool], Project.slug == slugify(project_key)), cast(ColumnElement[bool], Project.human_key == project_key))))
+            proj_result = await session.execute(
+                select(Project).where(
+                    or_(cast(ColumnElement[bool], Project.slug == slugify(project_key)), cast(ColumnElement[bool], Project.human_key == project_key))
+                )
+            )
             project = proj_result.scalars().first()
             if not project:
                 raise typer.BadParameter(f"Project not found for key: {project_key}")
@@ -3926,7 +4050,7 @@ def list_acks(
                         cast(ColumnElement[bool], Message.project_id == project.id),
                         cast(ColumnElement[bool], MessageRecipient.agent_id == agent.id),
                         cast(ColumnElement[bool], cast(Any, Message.ack_required).is_(True)),
-                        cast(ColumnElement[bool], cast(Any, MessageRecipient.ack_ts).is_(None))
+                        cast(ColumnElement[bool], cast(Any, MessageRecipient.ack_ts).is_(None)),
                     )
                 )
                 .order_by(desc(cast(Any, Message.created_ts)))
@@ -3987,9 +4111,7 @@ def config_set_port(
             action = "Created"
 
         # Write to temporary file in same directory (for atomic move)
-        temp_fd, temp_path = tempfile.mkstemp(
-            dir=env_path.parent, prefix=".env.tmp.", text=True
-        )
+        temp_fd, temp_path = tempfile.mkstemp(dir=env_path.parent, prefix=".env.tmp.", text=True)
         try:
             # Write content with secure permissions from the start
             # (best-effort on Windows where Unix permissions don't apply)
@@ -4133,9 +4255,7 @@ def _iter_doc_files(base: Path, max_depth: int) -> Iterable[Path]:
     def _on_error(error: OSError) -> None:  # pragma: no cover - best effort logging
         console.print(f"[yellow]Warning:[/yellow] Skipping {error.filename}: {error.strerror}")
 
-    for dirpath, dirnames, filenames in os.walk(
-        origin, topdown=True, followlinks=False, onerror=_on_error
-    ):
+    for dirpath, dirnames, filenames in os.walk(origin, topdown=True, followlinks=False, onerror=_on_error):
         current_depth = len(Path(dirpath).parts) - base_parts
         if max_depth >= 0 and current_depth >= max_depth:
             dirnames[:] = []
@@ -4181,9 +4301,7 @@ def _append_snippet_to_doc(path: Path, snippet: str) -> None:
 
 @docs_app.command("insert-blurbs")
 def docs_insert_blurbs(
-    scan_dir: Annotated[
-        Optional[List[Path]], typer.Option("--scan-dir", "-d", help="Directories to scan (repeatable).")
-    ] = None,
+    scan_dir: Annotated[Optional[List[Path]], typer.Option("--scan-dir", "-d", help="Directories to scan (repeatable).")] = None,
     yes: Annotated[bool, typer.Option("--yes", help="Automatically confirm insertion for each file.")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show actions without modifying files.")] = False,
     max_depth: Annotated[
@@ -4210,9 +4328,7 @@ def docs_insert_blurbs(
 
     candidates = _collect_doc_candidates(roots, max_depth=max_depth)
     if not candidates:
-        console.print(
-            "[yellow]No AGENTS.md or CLAUDE.md files found. Provide additional roots with --scan-dir.[/yellow]"
-        )
+        console.print("[yellow]No AGENTS.md or CLAUDE.md files found. Provide additional roots with --scan-dir.[/yellow]")
         return
 
     table = Table(title="Detected Agent Instructions", show_lines=False)
@@ -4231,9 +4347,7 @@ def docs_insert_blurbs(
         if candidate.has_snippet:
             console.print(f"[dim]Skipping {candidate.path} (snippet already present).[/dim]")
             continue
-        prompt = (
-            f"Insert Agent Mail + Beads snippet into {candidate.path}?"
-        )
+        prompt = f"Insert Agent Mail + Beads snippet into {candidate.path}?"
         if not yes and not typer.confirm(prompt, default=True):
             skipped += 1
             console.print(f"[yellow]Skipped {candidate.path}[/yellow]")
@@ -4248,10 +4362,7 @@ def docs_insert_blurbs(
     if dry_run:
         console.print("\n[dim]Dry run complete. Rerun without --dry-run to apply the changes.[/dim]")
     else:
-        console.print(
-            f"\n[cyan]Summary:[/cyan] inserted into {inserted} file(s); skipped {skipped} file(s); "
-            "other files already had the snippet."
-        )
+        console.print(f"\n[cyan]Summary:[/cyan] inserted into {inserted} file(s); skipped {skipped} file(s); other files already had the snippet.")
 
 
 # =============================================================================
@@ -4271,10 +4382,12 @@ def tools_list(
     # Get registered tools from FastMCP
     tools_info: list[dict[str, Any]] = []
     for tool_name, tool_def in mcp._tool_manager._tools.items():
-        tools_info.append({
-            "name": tool_name,
-            "description": (tool_def.description or "")[:80] + ("..." if len(tool_def.description or "") > 80 else ""),
-        })
+        tools_info.append(
+            {
+                "name": tool_name,
+                "description": (tool_def.description or "")[:80] + ("..." if len(tool_def.description or "") > 80 else ""),
+            }
+        )
 
     tools_info.sort(key=lambda x: x["name"])
 
@@ -4352,6 +4465,7 @@ def tools_call(
     if not pretty:
         os.environ["TOOLS_LOG_ENABLED"] = "false"
         from .config import clear_settings_cache
+
         clear_settings_cache()
 
     from .app import build_mcp_server
@@ -4378,7 +4492,9 @@ def tools_call(
             class Session:
                 async def send_log_message(self, *args: Any, **kwargs: Any) -> None:
                     pass
+
             session = Session()
+
         request_context = RequestContext()
 
         def __init__(self, verbose: bool = True) -> None:
