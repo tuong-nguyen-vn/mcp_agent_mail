@@ -182,14 +182,13 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
     is_sqlite = "sqlite" in settings.url.lower()
 
     if is_sqlite:
-        # Ensure parent directory exists for file-backed SQLite URLs.
-        # SQLite returns "unable to open database file" when the directory is missing.
-        try:
-            parsed = make_url(settings.url)
-            if parsed.database and parsed.database != ":memory:":
-                Path(parsed.database).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
+        # Ensure parent directory exists for SQLite database file
+        # Extract path from URL like "sqlite+aiosqlite:///path/to/db.sqlite3"
+        import re
+        match = re.search(r"sqlite.*:///(.+)$", settings.url)
+        if match:
+            db_path = Path(match.group(1)).expanduser().resolve()
+            db_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Register datetime adapters ONCE globally for Python 3.12+ compatibility
         # These are module-level registrations, not per-connection
