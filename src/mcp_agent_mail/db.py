@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import random
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+import re
+import time
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager, suppress
+from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar
@@ -14,7 +18,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from .config import DatabaseSettings, Settings, get_settings
+from .config import DatabaseSettings, Settings, clear_settings_cache, get_settings
 
 T = TypeVar("T")
 
@@ -22,6 +26,87 @@ _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 _schema_ready = False
 _schema_lock: asyncio.Lock | None = None
+
+_QUERY_TRACKER: contextvars.ContextVar["QueryTracker | None"] = contextvars.ContextVar("query_tracker", default=None)
+_QUERY_HOOKS_INSTALLED = False
+_SLOW_QUERY_LIMIT = 50
+_SQL_TABLE_RE = re.compile(r"\bfrom\s+([\w\.\"`\[\]]+)", re.IGNORECASE)
+_SQL_UPDATE_RE = re.compile(r"\bupdate\s+([\w\.\"`\[\]]+)", re.IGNORECASE)
+_SQL_INSERT_RE = re.compile(r"\binsert\s+into\s+([\w\.\"`\[\]]+)", re.IGNORECASE)
+
+
+@dataclass(slots=True)
+class QueryTracker:
+    total: int = 0
+    total_time_ms: float = 0.0
+    per_table: dict[str, int] = field(default_factory=dict)
+    slow_query_ms: float | None = None
+    slow_queries: list[dict[str, Any]] = field(default_factory=list)
+
+    def record(self, statement: str, duration_ms: float) -> None:
+        self.total += 1
+        self.total_time_ms += duration_ms
+        table = _extract_table_name(statement)
+        if table:
+            self.per_table[table] = self.per_table.get(table, 0) + 1
+        if (
+            self.slow_query_ms is not None
+            and duration_ms >= self.slow_query_ms
+            and len(self.slow_queries) < _SLOW_QUERY_LIMIT
+        ):
+            self.slow_queries.append(
+                {
+                    "table": table,
+                    "duration_ms": round(duration_ms, 2),
+                }
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total": self.total,
+            "total_time_ms": round(self.total_time_ms, 2),
+            "per_table": dict(sorted(self.per_table.items(), key=lambda item: (-item[1], item[0]))),
+            "slow_query_ms": self.slow_query_ms,
+            "slow_queries": list(self.slow_queries),
+        }
+
+
+def _clean_table_name(raw: str) -> str:
+    cleaned = raw.strip()
+    if "." in cleaned:
+        cleaned = cleaned.split(".")[-1]
+    return cleaned.strip("`\"[]")
+
+
+def _extract_table_name(statement: str) -> str | None:
+    for pattern in (_SQL_INSERT_RE, _SQL_UPDATE_RE, _SQL_TABLE_RE):
+        match = pattern.search(statement)
+        if match:
+            return _clean_table_name(match.group(1))
+    return None
+
+
+def get_query_tracker() -> QueryTracker | None:
+    return _QUERY_TRACKER.get()
+
+
+def start_query_tracking(*, slow_ms: float | None = None) -> tuple[QueryTracker, contextvars.Token]:
+    tracker = QueryTracker(slow_query_ms=slow_ms)
+    token = _QUERY_TRACKER.set(tracker)
+    return tracker, token
+
+
+def stop_query_tracking(token: contextvars.Token) -> None:
+    _QUERY_TRACKER.reset(token)
+
+
+@contextmanager
+def track_queries(*, slow_ms: float | None = None) -> Iterator[QueryTracker]:
+    tracker, token = start_query_tracking(slow_ms=slow_ms)
+    try:
+        yield tracker
+    finally:
+        stop_query_tracking(token)
 
 
 def retry_on_db_lock(max_retries: int = 5, base_delay: float = 0.1, max_delay: float = 5.0) -> Callable[..., Any]:
@@ -90,6 +175,7 @@ def retry_on_db_lock(max_retries: int = 5, base_delay: float = 0.1, max_delay: f
 def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
     """Build async SQLAlchemy engine with SQLite-optimized settings for concurrency."""
     from sqlalchemy import event
+    from sqlalchemy.engine import make_url
 
     # For SQLite, enable WAL mode and set timeout for better concurrent access
     connect_args = {}
@@ -142,13 +228,17 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
             "check_same_thread": False,  # Required for async SQLite
         }
 
+    # SQLite has low write concurrency; large pools can exhaust FDs under stress tests.
+    pool_size = 5 if is_sqlite else 25
+    max_overflow = 5 if is_sqlite else 25
+
     engine = create_async_engine(
         settings.url,
         echo=settings.echo,
         future=True,
         pool_pre_ping=True,
-        pool_size=25,  # Increased for high-concurrency workloads
-        max_overflow=25,  # Allow up to 50 total connections under load
+        pool_size=pool_size,
+        max_overflow=max_overflow,
         pool_timeout=30,  # Fail fast with clear error instead of hanging indefinitely
         pool_recycle=3600,  # Recycle connections after 1 hour to prevent stale handles
         connect_args=connect_args,
@@ -172,6 +262,50 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
     return engine
 
 
+def install_query_hooks(engine: AsyncEngine) -> None:
+    """Install lightweight query counting hooks on the engine (idempotent)."""
+    global _QUERY_HOOKS_INSTALLED
+    if _QUERY_HOOKS_INSTALLED:
+        return
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def before_cursor_execute(
+        conn: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: bool,
+    ) -> None:
+        tracker = _QUERY_TRACKER.get()
+        if tracker is None:
+            return
+        timings = conn.info.setdefault("query_start_time", [])
+        timings.append(time.perf_counter())
+
+    @event.listens_for(engine.sync_engine, "after_cursor_execute")
+    def after_cursor_execute(
+        conn: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: bool,
+    ) -> None:
+        tracker = _QUERY_TRACKER.get()
+        if tracker is None:
+            return
+        timings = conn.info.get("query_start_time")
+        if not timings:
+            return
+        start_time = timings.pop()
+        duration_ms = (time.perf_counter() - start_time) * 1000.0
+        tracker.record(statement, duration_ms)
+
+    _QUERY_HOOKS_INSTALLED = True
+
+
 def init_engine(settings: Settings | None = None) -> None:
     """Initialise global engine and session factory once."""
     global _engine, _session_factory
@@ -179,6 +313,7 @@ def init_engine(settings: Settings | None = None) -> None:
         return
     resolved_settings = settings or get_settings()
     engine = _build_engine(resolved_settings.database)
+    install_query_hooks(engine)
     _engine = engine
     _session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
@@ -200,8 +335,19 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 @asynccontextmanager
 async def get_session() -> AsyncIterator[AsyncSession]:
     factory = get_session_factory()
-    async with factory() as session:
+    session = factory()
+    try:
         yield session
+    finally:
+        # Ensure session close completes even under cancellation (anyio cancel scopes
+        # will raise asyncio.CancelledError which is BaseException in Python 3.14).
+        close_task = asyncio.create_task(session.close())
+        try:
+            await asyncio.shield(close_task)
+        except BaseException:
+            with suppress(BaseException):
+                await close_task
+            raise
 
 
 @retry_on_db_lock(max_retries=5, base_delay=0.1, max_delay=5.0)
@@ -237,10 +383,38 @@ async def ensure_schema(settings: Settings | None = None) -> None:
 def reset_database_state() -> None:
     """Test helper to reset global engine/session state."""
     global _engine, _session_factory, _schema_ready, _schema_lock
+    # Dispose any existing engine/pool first to avoid leaking file descriptors across tests.
+    if _engine is not None:
+        engine = _engine
+        try:
+            # Prefer a full async dispose when possible (aiosqlite uses background threads).
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+
+            if running is not None and running.is_running():
+                # Can't block; fall back to sync pool disposal (best effort).
+                engine.sync_engine.dispose()
+            else:
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None and not loop.is_running() and not loop.is_closed():
+                    loop.run_until_complete(engine.dispose())
+                else:
+                    asyncio.run(engine.dispose())
+        except Exception:
+            # Last resort: sync pool disposal.
+            with suppress(Exception):
+                engine.sync_engine.dispose()
     _engine = None
     _session_factory = None
     _schema_ready = False
     _schema_lock = None
+    # Tests frequently mutate env vars; keep settings cache in sync with DB resets.
+    clear_settings_cache()
 
 
 def _setup_fts(connection: Any) -> None:
@@ -299,4 +473,69 @@ def _setup_fts(connection: Any) -> None:
     connection.exec_driver_sql(
         "CREATE INDEX IF NOT EXISTS idx_message_recipients_agent ON message_recipients(agent_id)"
     )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_message_recipients_agent_message "
+        "ON message_recipients(agent_id, message_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_messages_project_sender_created "
+        "ON messages(project_id, sender_id, created_ts DESC)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_file_reservations_project_released_expires "
+        "ON file_reservations(project_id, released_ts, expires_ts)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_file_reservations_project_agent_released "
+        "ON file_reservations(project_id, agent_id, released_ts)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_product_project "
+        "ON product_project_links(product_id, project_id)"
+    )
+    # AgentLink indexes for efficient contact lookups
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_agent_links_a_project "
+        "ON agent_links(a_project_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_agent_links_b_project "
+        "ON agent_links(b_project_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_agent_links_b_project_agent "
+        "ON agent_links(b_project_id, b_agent_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_agent_links_status "
+        "ON agent_links(status)"
+    )
 
+
+def get_database_path(settings: Settings | None = None) -> Path | None:
+    """Extract the filesystem path to the SQLite database file from settings.
+
+    Args:
+        settings: Application settings, or None to use global settings
+
+    Returns:
+        Path to the database file, or None if not using SQLite or path cannot be determined
+    """
+    resolved = settings or get_settings()
+    url_raw = resolved.database.url
+
+    try:
+        from sqlalchemy.engine import make_url
+
+        parsed = make_url(url_raw)
+    except Exception:
+        return None
+
+    if parsed.get_backend_name() != "sqlite":
+        return None
+
+    db_path = parsed.database
+    if not db_path or db_path == ":memory:":
+        return None
+
+    return Path(db_path)
