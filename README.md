@@ -16,46 +16,41 @@ A mail-like coordination layer for coding agents via MCP. Provides identities, i
 
 ## Installation
 
-### Quick Install (Recommended)
+### Requirements
 
-```bash
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --yes
-```
+- Python >= 3.14
+- uv (package manager)
+- Git
 
-This will:
-- Install `uv` and Python 3.14 venv
-- Set up the MCP server on port 8765
-- Add `am` alias to your shell
-
-### Manual Install
+### Install
 
 ```bash
 # Install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
 
 # Clone and setup
 git clone https://github.com/Dicklesworthstone/mcp_agent_mail
 cd mcp_agent_mail
 
 # Create venv and install
-uv python install 3.14
-uv venv -p 3.14
-source .venv/bin/activate
-uv sync
-
-# Start server
-scripts/run_server_with_token.sh
+uv venv --python python3.14
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+uv pip install -e .
 ```
 
-### Global CLI Access
+### Verify Installation
 
-After installation, add to PATH:
+```bash
+am --help
+# or
+mcp-agent-mail --help
+```
+
+### Global CLI Access (Optional)
 
 ```bash
 # Option 1: Symlink
 sudo ln -sf $(pwd)/.venv/bin/am /usr/local/bin/am
-sudo ln -sf $(pwd)/.venv/bin/mcp-agent-mail /usr/local/bin/mcp-agent-mail
 
 # Option 2: Add to PATH in ~/.zshrc or ~/.bashrc
 export PATH="/path/to/mcp_agent_mail/.venv/bin:$PATH"
