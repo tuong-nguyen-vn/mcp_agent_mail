@@ -4511,17 +4511,37 @@ def tools_call(
         async def debug(self, msg: str) -> None:
             pass
 
+    def _unwrap_result(result: Any) -> Any:
+        """Unwrap ToolResult or other wrapper objects to get the actual data."""
+        if hasattr(result, "data"):
+            return result.data
+        if hasattr(result, "content"):
+            content = result.content
+            if isinstance(content, list) and len(content) > 0 and hasattr(content[0], "text"):
+                try:
+                    return json.loads(content[0].text)
+                except (json.JSONDecodeError, TypeError):
+                    return content[0].text
+            return content
+        return result
+
     async def _call_tool() -> Any:
         await ensure_schema()
-        tool_func = mcp._tool_manager._tools[tool_name].fn
-        ctx = CLIContext(verbose=pretty)
+        try:
+            tool_func = mcp._tool_manager._tools[tool_name].fn
+            ctx = CLIContext(verbose=pretty)
+            result = await tool_func(ctx, **arguments)
+            return _unwrap_result(result)
+        finally:
+            from .db import get_engine
 
-        # Call the tool function
-        result = await tool_func(ctx, **arguments)
-        return result
+            with suppress(Exception):
+                engine = get_engine()
+                await engine.dispose()
 
     try:
         result = asyncio.run(_call_tool())
+        result = _unwrap_result(result)
         if pretty:
             if isinstance(result, dict | list):
                 console.print_json(json.dumps(result, indent=2, default=str))
