@@ -42,7 +42,6 @@ from sqlalchemy import (
 from sqlalchemy.engine import make_url
 from sqlalchemy.sql import ColumnElement
 
-from .app import _sanitize_fts_query
 from .config import get_settings
 from .db import ensure_schema, get_session
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
@@ -66,7 +65,6 @@ from .share import (
     summarize_snapshot,
 )
 from .storage import ensure_archive
-from .tool_runner import run_mcp_tool_json
 from .utils import slugify
 
 # Suppress annoying bleach CSS sanitizer warning from dependencies
@@ -131,7 +129,10 @@ app.add_typer(tools_app, name="tool")
 
 
 def _register_mcp_tool_commands() -> None:
-    """Auto-register all MCP tools as direct CLI commands."""
+    """Auto-register all MCP tools as direct CLI commands.
+
+    Deferred to first invocation to avoid loading app.py / fastmcp at startup.
+    """
     from .app import build_mcp_server
 
     mcp = build_mcp_server()
@@ -139,7 +140,7 @@ def _register_mcp_tool_commands() -> None:
     for tool_name, tool_def in mcp._tool_manager._tools.items():
         # Create a closure to capture tool_name
         def make_command(tname: str, tdesc: str) -> None:
-            @app.command(name=tname, help=tdesc[:200] if tdesc else f"Call MCP tool: {tname}")
+            @tools_app.command(name=tname, help=tdesc[:200] if tdesc else f"Call MCP tool: {tname}")
             def tool_command(
                 args_json: Annotated[str, typer.Argument(help="Tool arguments as JSON string")] = "{}",
                 pretty: Annotated[bool, typer.Option("--pretty", "-p", help="Pretty print JSON output (default: robot mode with raw JSON)")] = False,
@@ -254,11 +255,6 @@ def _execute_tool_call(tool_name: str, args_json: str, pretty: bool) -> None:
     except Exception as e:
         console.print(f"[red]Tool execution failed: {e}[/red]")
         raise typer.Exit(1) from None
-
-
-# Register all MCP tools as direct CLI commands
-with suppress(Exception):
-    _register_mcp_tool_commands()
 
 
 async def _get_project_record(identifier: str) -> Project:

@@ -3,6 +3,9 @@
 Centralizes LLM usage behind a minimal async helper. Providers + API keys
 are configured via environment variables; configuration toggles come from
 python-decouple in `config.py`.
+
+NOTE: ``litellm`` is imported **lazily** (inside functions that need it)
+to avoid a ~11-second startup penalty on every CLI invocation.
 """
 
 from __future__ import annotations
@@ -15,10 +18,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-import litellm
 import structlog
 from decouple import Config as DecoupleConfig, RepositoryEnv
-from litellm.types.caching import LiteLLMCacheType
 
 from .config import get_settings
 
@@ -36,8 +37,15 @@ class LlmOutput:
     estimated_cost_usd: float | None = None
 
 
+def _get_litellm() -> Any:
+    """Lazy-import litellm to avoid 11+ second module-level cost."""
+    import litellm as _litellm
+    return _litellm
+
+
 def _existing_callbacks() -> list[Any]:
-    callbacks = getattr(litellm, "success_callback", []) or []
+    _litellm = _get_litellm()
+    callbacks = getattr(_litellm, "success_callback", []) or []
     return list(callbacks)
 
 
@@ -51,7 +59,6 @@ def _setup_callbacks() -> None:
             cost = float(kwargs.get("response_cost", 0.0) or 0.0)
             model = str(kwargs.get("model", ""))
             if cost > 0:
-                # Prefer rich terminal output when enabled; fallback to structlog
                 if settings.log_rich_enabled:
                     try:
                         import importlib as _imp
@@ -72,14 +79,13 @@ def _setup_callbacks() -> None:
                 else:
                     _logger.info("litellm.cost", model=model, cost_usd=cost)
         except Exception:
-            # Never let logging issues impact normal flow
             pass
 
+    _litellm = _get_litellm()
     if _on_success not in _existing_callbacks():
         callbacks: list[Any] = [*_existing_callbacks(), _on_success]
-        # Attribute exists on modern LiteLLM; fall back safely if absent
         with contextlib.suppress(Exception):
-            litellm.success_callback = callbacks
+            _litellm.success_callback = callbacks
 
 
 async def _ensure_initialized() -> None:
@@ -90,15 +96,15 @@ async def _ensure_initialized() -> None:
         if _initialized:
             return
         settings = get_settings()
+        _litellm = _get_litellm()
 
-        # Bridge provider keys from .env to environment for LiteLLM
         try:
             _bridge_provider_env()
         except Exception:
             _logger.debug("litellm.env.bridge_failed")
 
-        # Enable cache globally (in-memory or Redis) using LiteLLM's API
         if settings.llm.cache_enabled:
+            from litellm.types.caching import LiteLLMCacheType
             with contextlib.suppress(Exception):
                 backend = (getattr(settings.llm, "cache_backend", "local") or "local").lower()
                 if backend == "redis" and getattr(settings.llm, "cache_redis_url", ""):
@@ -107,9 +113,8 @@ async def _ensure_initialized() -> None:
                     port = str(parsed.port or "6379")
                     pwd = parsed.password or None
                     try:
-                        # Fast DNS sanity check to avoid noisy connection errors on placeholders
                         socket.gethostbyname(host)
-                        litellm.enable_cache(
+                        _litellm.enable_cache(
                             type=LiteLLMCacheType.REDIS,
                             host=str(host),
                             port=str(port),
@@ -117,15 +122,12 @@ async def _ensure_initialized() -> None:
                         )
                     except Exception:
                         _logger.info("litellm.cache.redis_unavailable_fallback_local", host=host, port=port)
-                        litellm.enable_cache(type=LiteLLMCacheType.LOCAL)
+                        _litellm.enable_cache(type=LiteLLMCacheType.LOCAL)
                 else:
-                    litellm.enable_cache(type=LiteLLMCacheType.LOCAL)
+                    _litellm.enable_cache(type=LiteLLMCacheType.LOCAL)
 
         _setup_callbacks()
 
-        # Skip Router initialization - we use direct litellm.completion() calls.
-        # Router is designed for load balancing across multiple deployments with a model_list,
-        # but we're just using single API keys, so direct completion is simpler and works fine.
         _router = None
         _initialized = True
 
@@ -138,18 +140,15 @@ def _choose_best_available_model(preferred: str) -> str:
     """
     env = os.environ
 
-    # If the string already looks provider-qualified, leave it as-is
     if "/" in preferred or ":" in preferred:
         return preferred
 
-    # Alias unsupported placeholder to sensible defaults by provider key presence
     if env.get("OPENAI_API_KEY"):
         return "gpt-4o-mini"
     if env.get("GOOGLE_API_KEY"):
         return "gemini-1.5-flash"
     if env.get("ANTHROPIC_API_KEY"):
         return "claude-3-haiku-20240307"
-    # Other providers as last resorts (strings accepted by LiteLLM)
     if env.get("GROQ_API_KEY"):
         return "groq/llama-3.1-70b-versatile"
     if env.get("DEEPSEEK_API_KEY"):
@@ -157,7 +156,6 @@ def _choose_best_available_model(preferred: str) -> str:
     if env.get("XAI_API_KEY"):
         return "xai/grok-2-mini"
     if env.get("OPENROUTER_API_KEY"):
-        # OpenRouter requires qualified model ids; choose a widely available one
         return "openrouter/openai/gpt-4o-mini"
     return preferred
 
@@ -176,6 +174,7 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
     """
     global _router
     await _ensure_initialized()
+    _litellm = _get_litellm()
     settings = get_settings()
     use_model = model or settings.llm.default_model
     use_model = _resolve_model_alias(use_model)
@@ -191,7 +190,7 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
         return router.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
 
     def _call_direct() -> Any:
-        return litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
+        return _litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
 
     resp: Any
     try:
@@ -201,21 +200,18 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
         else:
             resp = await asyncio.to_thread(_call_direct)
     except Exception as err:
-        # Fallback to direct completion if Router path fails (e.g., no deployments)
         _router = None
         _logger.debug("litellm.router.disabled_after_failure")
         try:
             resp = await asyncio.to_thread(_call_direct)
         except Exception:
-            # As a last resort, try with a provider-backed small model if available
             alt_model = _choose_best_available_model(use_model)
             if alt_model != use_model:
                 use_model = alt_model
-                resp = await asyncio.to_thread(lambda: litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks))
+                resp = await asyncio.to_thread(lambda: _litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks))
             else:
                 raise err from None
 
-    # Normalize content across potential shapes
     content: str
     try:
         msg = resp.choices[0].message
@@ -236,7 +232,6 @@ def _bridge_provider_env() -> None:
     """
     from decouple import RepositoryEmpty
 
-    # Gracefully handle missing .env file (e.g., in CI/tests)
     try:
         cfg = DecoupleConfig(RepositoryEnv(".env"))
     except FileNotFoundError:
@@ -256,7 +251,6 @@ def _bridge_provider_env() -> None:
                 return v
         return ""
 
-    # Canonical targets with possible synonyms
     mappings: list[tuple[str, tuple[str, ...]]] = [
         ("OPENAI_API_KEY", ("OPENAI_API_KEY",)),
         ("ANTHROPIC_API_KEY", ("ANTHROPIC_API_KEY",)),
@@ -272,4 +266,3 @@ def _bridge_provider_env() -> None:
             val = _get_from_any(*aliases)
             if val:
                 os.environ[canonical] = val
-

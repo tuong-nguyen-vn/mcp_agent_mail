@@ -44,7 +44,7 @@ from .db import (
     stop_query_tracking,
 )
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
-from .llm import complete_system_user
+
 from .models import (
     Agent,
     AgentLink,
@@ -2082,6 +2082,7 @@ async def _score_project_pair(
     )
 
     try:
+        from .llm import complete_system_user
         completion = await complete_system_user(system_prompt, user_prompt, max_tokens=400)
         payload = completion.content.strip()
         data = json.loads(payload)
@@ -3510,6 +3511,7 @@ async def _compute_thread_summary(
                     "total_messages, open_actions, done_actions. Derive from the given thread excerpts."
                 )
                 user = "\n\n".join(excerpts)
+                from .llm import complete_system_user
                 llm_resp = await complete_system_user(system, user, model=llm_model)
                 parsed = _parse_json_safely(llm_resp.content)
                 if parsed:
@@ -6591,6 +6593,7 @@ def build_mcp_server() -> FastMCP:
                     "Return JSON: { threads: [{thread_id, key_points[], actions[]}], aggregate: {top_mentions[], key_points[], action_items[]} }."
                 )
                 user = "\n\n".join(parts)
+                from .llm import complete_system_user
                 llm_resp = await complete_system_user(system, user, model=llm_model)
                 parsed = _parse_json_safely(llm_resp.content)
                 if parsed:
@@ -7791,6 +7794,7 @@ def build_mcp_server() -> FastMCP:
                             "total_messages, open_actions, done_actions. Derive from the given thread excerpts."
                         )
                         user = "\n\n".join(excerpts)
+                        from .llm import complete_system_user
                         llm_resp = await complete_system_user(system, user, model=llm_model)
                         parsed = _parse_json_safely(llm_resp.content)
                         if parsed:
